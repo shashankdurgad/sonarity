@@ -36,8 +36,8 @@ Answer these before kickoff if you can; the plan picks defaults otherwise.
 
 | # | Question | Default assumed |
 |---|---|---|
-| 1 | Is the $250 all Modal GPU credit, or does it also need to cover storage/CPU? | All GPU; CPU + storage ≈ $5–10 extra |
-| 2 | Max concurrent L40S on the workspace? | Assume **4** concurrent; plan scales to 8–10 if allowed |
+| 1 | Budget is **$500 of Modal credit on one shared workspace**. Does its plan have seats for all 5? (Starter lists up to 3) | Check at T+0. If short, upgrade the plan or have the extra people run jobs through a teammate who has access |
+| 2 | Max concurrent L40S on the workspace? | Modal lists **10** on Starter; plan assumes **4** and scales to 8–10 if GPUs are available |
 | 3 | Does anyone have an Isaac Sim / Omniverse account already? (needed for some asset downloads) | One person creates it at T+0 |
 | 4 | Gemini 4 Argon API key confirmed working? | Yes; `gemini-3.8-flash` fallback |
 | 5 | Is Cosmos 3 gated access already granted on someone's HF account? | Request at T+0; fallback Cosmos Predict2-2B (ungated) |
@@ -131,7 +131,7 @@ observation.images.sonar, observation.images.cam, observation.state, action, tas
 
 ---
 
-## 3. Budget model ($250, L40S only, ≈$1.95/hr → ~128 GPU-hours total)
+## 3. Budget model ($500, L40S only, ≈$1.95/hr → ~256 GPU-hours total)
 
 Everything runs on L40S. No H100 means: keep the world model at **Edge 4B**, LoRA not full fine-tune, 8–16-frame windows, 256–360p. Parallelism comes from several L40S running *independent* jobs, never one job split across GPUs.
 
@@ -147,9 +147,12 @@ Everything runs on L40S. No H100 means: keep the world model at **Edge 4B**, LoR
 | **Tier 3** extras (swarm, plume, re-records) | 12 | $23 | Only if ahead of schedule |
 | Shader-cache image build, mistakes, OOMs | — | $25 | Buffer |
 | CPU, storage, egress | — | $8 | |
-| **Total** | **~72 GPU-h** | **≈$174** | Leaves ~$75 headroom |
+| **Total** | **~72 GPU-h** | **≈$174** | Leaves ~$326 headroom |
+
+**Time is now the limit, not credit.** Spend the headroom to save hours: fan out data gen and recording to 8–10 L40S if available, run a third LoRA config, and record more seeds. The tier order and gates don't change.
 
 Rules:
+- Set a workspace budget of **$450** so a runaway job can't use all the credit.
 - Bake Isaac Sim's shader cache into the Modal image (or a Volume) before fanning out, or every container burns 3–5 min of GPU at startup.
 - Every Modal function has `container_idle_timeout ≤ 120` and `timeout` set. No GPU sits idle.
 - One person owns the Modal dashboard and checks spend at every gate.
@@ -176,7 +179,7 @@ Rules:
 
 ### Phase 0 — T+0:00 → T+0:30 — Kickoff
 - Confirm answers to the open questions. Check Modal L40S concurrency.
-- Repo (layout §7), Modal workspace, Volume `/data`, HF org + dataset repo.
+- Repo (layout §7), invite the team to the Modal workspace, Volume `/data`, HF org + dataset repo.
 - Request Cosmos 3 gated access on HF (one account). Create Omniverse/NVIDIA developer account for Isaac Sim assets.
 - Agree §2 interfaces. Video workstream starts script v1 from §6.
 
@@ -308,7 +311,7 @@ northsea-uxo-auv/
 ## 9. First-hour checklist
 
 - [ ] Open questions answered; L40S concurrency known
-- [ ] Modal workspace, Volume, idle-timeouts policy agreed
+- [ ] Team invited to the Modal workspace; $450 budget set; Volume and idle-timeouts policy agreed
 - [ ] HF org + `northsea-uxo-survey-v1` repo; Cosmos 3 access requested
 - [ ] NVIDIA developer / Omniverse account for Isaac assets
 - [ ] Repo created; §2 interfaces pasted into README
