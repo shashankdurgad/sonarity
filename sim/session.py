@@ -37,10 +37,22 @@ COLOURS = {
 }
 
 
+DEFAULT_SEABED = (-30.0, 110.0, -30.0, 90.0)  # covers the placeholder area and P3's x 20-70 layout
+
+
+def seabed_bounds_for(world: dict, margin: float = 25.0) -> tuple[float, float, float, float]:
+    """Seabed extent for a world: objects bbox + survey margin (4) + lead-in (6) + sonar range (10) + spare."""
+    xs = [o["xyz"][0] for o in world["objects"]] or [16.0]
+    ys = [o["xyz"][1] for o in world["objects"]] or [16.0]
+    return min(xs) - margin, max(xs) + margin, min(ys) - margin, max(ys) + margin
+
+
 class SimSession:
     def __init__(self, sonar: SonarParams = SonarParams(), flip_azimuth: bool = False, warmup: int = 20,
                  sun: float = 300.0, dome: float = 80.0, sonar_norm: str = "all",
-                 sonar_gamma: float = 1.0, sonar_gain: float = 8.0, chase: bool = True):
+                 sonar_gamma: float = 1.0, sonar_gain: float = 8.0, chase: bool = True,
+                 seabed_bounds: tuple | None = None):
+        self._init_seabed_bounds = tuple(seabed_bounds) if seabed_bounds else DEFAULT_SEABED
         self._chase_enabled = chase
         self.chase_cam = None
         self._auv = None
@@ -55,7 +67,8 @@ class SimSession:
         self.flip_azimuth = flip_azimuth
         self.murk = 0.0
         self.world = {"objects": []}
-        self._prims = {}
+        self._prims = {}  # object id -> prim path
+        self._scene = None
         self._warmup = warmup
 
         import isaacsim
@@ -74,7 +87,7 @@ class SimSession:
         self._sun_light = UsdLux.DistantLight.Define(self.stage, "/World/Sun")
         self._dome_light = UsdLux.DomeLight.Define(self.stage, "/World/Dome")
         self.set_lights(self._sun, self._dome)
-        self._build_seabed()
+        self._build_seabed(bounds=self._init_seabed_bounds)
         self._make_sensors()
 
     # ---------- scene ----------
@@ -84,13 +97,21 @@ class SimSession:
         add_labels(prim, labels=[f"{reflectivity}"], instance_name="reflectivity")
         add_labels(prim, labels=[cls], instance_name="class")
 
-    def _build_seabed(self, half: float = 45.0, res: float = 0.5, seed: int = 0):
+    def _build_seabed(self, bounds=DEFAULT_SEABED, max_verts: int = 300, seed: int = 0):
+        """Seabed mesh over bounds = (x0, x1, y0, y1). Must cover everything the sonar can see:
+        if the sonar looks past the edge it gets an empty point cloud and OceanSim crashes."""
         from pxr import Gf, UsdGeom, Vt
 
+        if self.stage.GetPrimAtPath("/World/Seabed"):
+            self.stage.RemovePrim("/World/Seabed")
+        self._seabed_bounds = bounds
         rng = np.random.default_rng(seed)
-        xs = np.arange(-half + 16, half + 16 + 1e-6, res)
-        n = len(xs)
-        X, Y = np.meshgrid(xs, xs, indexing="ij")
+        x0, x1, y0, y1 = bounds
+        res = max(0.5, max(x1 - x0, y1 - y0) / (max_verts - 1))
+        xs = np.arange(x0, x1 + 1e-6, res)
+        ys = np.arange(y0, y1 + 1e-6, res)
+        nx, n = len(xs), len(ys)
+        X, Y = np.meshgrid(xs, ys, indexing="ij")
         # Smooth long-wave undulation only: per-vertex height noise caused swirl artefacts in the sonar.
         Z = 0.05 * np.sin(X * 0.21) * np.cos(Y * 0.17)
         # Sand texture for the camera via per-vertex colour: ripples + patches + grain.
@@ -101,13 +122,13 @@ class SimSession:
         cols = [Gf.Vec3f(*(base * s)) for s in np.clip(shade, 0.5, 1.2).ravel()]
         pts = [Gf.Vec3f(float(x), float(y), float(z)) for x, y, z in zip(X.ravel(), Y.ravel(), Z.ravel())]
         idx = []
-        for i in range(n - 1):
+        for i in range(nx - 1):
             for j in range(n - 1):
                 a = i * n + j
                 idx += [a, a + n, a + n + 1, a + 1]
         mesh = UsdGeom.Mesh.Define(self.stage, "/World/Seabed")
         mesh.CreatePointsAttr(Vt.Vec3fArray(pts))
-        mesh.CreateFaceVertexCountsAttr(Vt.IntArray([4] * ((n - 1) ** 2)))
+        mesh.CreateFaceVertexCountsAttr(Vt.IntArray([4] * ((nx - 1) * (n - 1))))
         mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(idx))
         mesh.CreateSubdivisionSchemeAttr("none")
         mesh.CreateDisplayColorPrimvar(UsdGeom.Tokens.vertex).Set(Vt.Vec3fArray(cols))
@@ -196,20 +217,56 @@ class SimSession:
                 a = 2 * math.pi * k / n
                 self._gprim("Sphere", f"{root}/s{k}", cls, t=(R * math.cos(a), R * math.sin(a), rr),
                             s=(1.3, 1.3, 1.0), Radius=rr)
-        self._prims[oid] = xf
+        self._prims[oid] = root
+
+    def _scene_labeler(self, prim, cls, oid):
+        """Callback for P3's sim/scene.py: the sonar only sees prims with a reflectivity label."""
+        from pxr import UsdGeom
+
+        # A single displayColor on a mesh without interpolation='constant' is read as per-vertex and
+        # corrupts the pointcloud annotator, crashing the sonar when the object enters view.
+        gp = UsdGeom.Gprim(prim)
+        if gp:
+            pv = gp.GetDisplayColorPrimvar()
+            if pv and pv.HasValue() and len(pv.Get() or []) == 1:
+                pv.SetInterpolation(UsdGeom.Tokens.constant)
+        self._label(prim, REFLECTIVITY[cls], cls)
+
+    def _scene_add(self, obj: dict):
+        """Add one object via P3's scene.add_object (if scene.py exists) or the placeholder builder."""
+        if self._scene is None:
+            self._add_object(obj)
+        else:
+            self._prims[obj["id"]] = self._scene.add_object(
+                self.stage, obj, parent_path="/World/SurveySite/Objects", semantic_labeler=self._scene_labeler)
 
     def load_world(self, world: dict):
         """Build all objects from a world.json dict. Uses P3's sim/scene.py if present."""
-        self.world = {**world, "objects": [dict(o) for o in world["objects"]]}
+        self.world = {**world, "objects": [dict(o, xyz=list(o["xyz"])) for o in world["objects"]]}
+        need, b = seabed_bounds_for(self.world), self._seabed_bounds
+        if need[0] < b[0] or need[1] > b[1] or need[2] < b[2] or need[3] > b[3]:
+            # Rebuilding the seabed after the sonar starts breaks OceanSim's point cloud (all frames go
+            # blank), so we only warn. Pass seabed_bounds=seabed_bounds_for(world) to SimSession instead.
+            print(f"[session] WARNING world needs seabed {need} but it is {b}; sonar may go blank near "
+                  f"the edges. Create SimSession(seabed_bounds=seabed_bounds_for(world)).", flush=True)
         try:
             from sim import scene  # P3
-
-            scene.build_scene(self.stage, self.world)
-            print("[session] scene built by sim/scene.py", flush=True)
         except ImportError:
+            scene = None
+        self._scene = scene
+        if scene is None:
             for obj in self.world["objects"]:
                 self._add_object(obj)
             print(f"[session] placeholder scene: {len(self.world['objects'])} objects", flush=True)
+        else:
+            try:  # our textured, sonar-labelled seabed replaces scene.py's flat box
+                paths = scene.build_scene(self.stage, self.world, semantic_labeler=self._scene_labeler,
+                                          include_seabed=False)
+            except TypeError:  # older scene.py without include_seabed
+                paths = scene.build_scene(self.stage, self.world, semantic_labeler=self._scene_labeler)
+                self.stage.RemovePrim("/World/SurveySite/Seabed")
+            self._prims.update(paths)
+            print(f"[session] scene built by sim/scene.py: {len(paths)} objects", flush=True)
         if world.get("scenario") == "murky":
             self.murk = 0.7
 
@@ -307,10 +364,14 @@ class SimSession:
         """Render and return (sonar 512x512 uint8 fan, camera 360x640x3 uint8)."""
         for _ in range(settle_steps):
             self.world_api.step(render=True)
-        self.sonar.make_sonar_data(intensity_gain=self.sonar_gain)
-        polar = self.sonar.get_sonar_image()
-        polar = polar.numpy() if hasattr(polar, "numpy") else np.asarray(polar)
-        fan = polar_to_fan(polar, self.p, flip_azimuth=self.flip_azimuth, gamma=self._gamma)
+        try:
+            self.sonar.make_sonar_data(intensity_gain=self.sonar_gain)
+            polar = self.sonar.get_sonar_image()
+            polar = polar.numpy() if hasattr(polar, "numpy") else np.asarray(polar)
+            fan = polar_to_fan(polar, self.p, flip_azimuth=self.flip_azimuth, gamma=self._gamma)
+        except KeyError as e:  # empty point cloud (nothing labelled in view): OceanSim's annotator throws
+            print(f"[session] sonar saw nothing ({e}); returning a blank frame", flush=True)
+            fan = np.zeros((512, 512), np.uint8)
         self.cam.render()
         frame = getattr(self.cam, "_uw_frame", None)
         if frame is None:
@@ -339,22 +400,24 @@ class SimSession:
         {"type": "set_burial", "id": "o3", "burial": 0.2}
         {"type": "set_murk", "level": 0.0..1.0}
         """
-        from pxr import Gf
+        from pxr import Gf, UsdGeom
 
         kind = event["type"]
         if kind == "add_object":
-            obj = dict(event["object"])
+            obj = dict(event["object"], xyz=list(event["object"]["xyz"]))
             self.world["objects"].append(obj)
-            self._add_object(obj)
+            self._scene_add(obj)
         elif kind == "remove_object":
-            self.stage.RemovePrim(f"/World/Objects/{event['id']}")
-            self._prims.pop(event["id"], None)
+            path = self._prims.pop(event["id"], None)
+            if path:
+                self.stage.RemovePrim(path)
             self.world["objects"] = [o for o in self.world["objects"] if o["id"] != event["id"]]
         elif kind == "set_burial":
             obj = next(o for o in self.world["objects"] if o["id"] == event["id"])
             obj["burial"] = float(event["burial"])
             obj["xyz"][2] = -obj["burial"] * CLASS_SPECS[obj["cls"]]["height"]
-            self._prims[obj["id"]].GetOrderedXformOps()[0].Set(Gf.Vec3d(*obj["xyz"]))
+            xf = UsdGeom.Xformable(self.stage.GetPrimAtPath(self._prims[obj["id"]]))
+            xf.GetOrderedXformOps()[0].Set(Gf.Vec3d(*obj["xyz"]))
         elif kind == "set_murk":
             self.murk = float(event["level"])
         else:

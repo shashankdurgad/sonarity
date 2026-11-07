@@ -21,6 +21,31 @@ CLASS_SPECS = {
 }
 YOLO_NAMES = ["mine_like", "other"]
 
+# If P3's sim/scene.py publishes its geometry sizes, use them so label boxes match the rendered objects.
+try:
+    from sim.scene import DIMENSIONS_M as _P3_DIMS  # {cls: {"length", "width", "height"}}
+
+    for _cls, _d in _P3_DIMS.items():
+        CLASS_SPECS[_cls].update({k: float(_d[k]) for k in ("length", "width", "height") if k in _d})
+except (ImportError, AttributeError, KeyError):
+    pass
+
+
+def get_world(seed: int, scenario: str) -> dict:
+    """P3's scene.make_world when sim/scene.py exists, else the placeholder below."""
+    try:
+        from sim.scene import make_world as p3_make_world
+    except ImportError:
+        return make_world(seed, scenario)
+    return p3_make_world(seed, scenario)
+
+
+def survey_area(world: dict, margin: float = 4.0) -> tuple[float, float, float, float]:
+    """Bounding box of the objects plus a margin: the lawnmower covers this."""
+    xs = [o["xyz"][0] for o in world["objects"]]
+    ys = [o["xyz"][1] for o in world["objects"]]
+    return min(xs) - margin, max(xs) + margin, min(ys) - margin, max(ys) + margin
+
 AREA = (0.0, 32.0, 0.0, 32.0)  # x_min, x_max, y_min, y_max of the object field
 
 
@@ -52,9 +77,10 @@ def make_world(seed: int, scenario: str = "clear_sand", n_extra: int = 0) -> dic
 
 
 def lawnmower(lane_spacing: float = 8.0, step: float = 0.75, speed: float = 0.75,
-              lead_in: float = 6.0, altitude: float = 2.5, n_lanes: int | None = None) -> list[dict]:
-    """Boustrophedon path along ±x over AREA, with transit legs between lanes. Returns pose dicts."""
-    x0, x1, y0, y1 = AREA
+              lead_in: float = 6.0, altitude: float = 2.5, n_lanes: int | None = None,
+              area: tuple[float, float, float, float] = AREA) -> list[dict]:
+    """Boustrophedon path along ±x over `area`, with transit legs between lanes. Returns pose dicts."""
+    x0, x1, y0, y1 = area
     lanes = list(np.arange(y0, y1 + 1e-6, lane_spacing))
     if n_lanes:
         lanes = lanes[:n_lanes]

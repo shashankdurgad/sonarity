@@ -3,7 +3,9 @@
 ## Running
 
 ```bash
-python -P -m modal run infra/step3_sonar.py   # sonar + UW camera smoke test on Modal L40S
+python -P -m modal run infra/sim_jobs.py::main --seed 3 [--scenario half_buried|murky] [--quick]   # one survey -> runs/<id>/
+python -P -m modal run infra/sim_jobs.py::batch --seeds 10-19 --scenarios clear_sand,half_buried   # training data, stays on Volume uxo-runs
+python -P -m modal run infra/step3_sonar.py   # sonar + UW camera smoke test
 ```
 Use `python -P` on any machine: the `-P` keeps the repo root off `sys.path`, so a stray local folder can't shadow the `modal` library.
 
@@ -31,3 +33,9 @@ The geometry lives in `sim/sonar_geometry.py`. It is plain NumPy, so it runs on 
 - Distance from the sensor pixel is **slant range** at a fixed `SonarParams().m_per_px`.
 - Detector box to world position: `pixel_to_world(col, row, pose_row_from_poses_csv)`.
 - `world.json` object to label pixel: `world_to_pixel(x, y, pose)`. Use this to make YOLO labels.
+
+## Gotchas found integrating sim/scene.py (P3)
+
+6. **The seabed must cover everything the sonar can see.** If the sonar looks past its edge, OceanSim's point cloud is empty and it throws `KeyError: .../Replicator_pointcloud`. **You can't rebuild the seabed after the sonar has started** (every later frame goes blank), so size it up front: `SimSession(seabed_bounds=seabed_bounds_for(world))`. `observe()` returns a blank sonar frame rather than crashing if it ever sees nothing.
+7. SimSession uses `sim/scene.py` when it exists. It passes `build_scene` a labeller that adds the `reflectivity` label, asks for `include_seabed=False` (we build our own textured, labelled seabed), and uses the returned prim paths for `apply_change`. `sim/objects.get_world()` uses `scene.make_world`, and label sizes come from `scene.DIMENSIONS_M` if present.
+8. Single-colour meshes must set `displayColor` interpolation to `constant`, or RTX reads it as per-vertex and complains about corrupted data.

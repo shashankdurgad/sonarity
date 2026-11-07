@@ -41,6 +41,38 @@ def survey(run_id: str, seed: int, scenario: str, quick: bool = False, flip_azim
     return buf.getvalue()
 
 
+@app.function(image=isaac_image, gpu="L40S", timeout=3600,
+              volumes={CACHE_MOUNT: cache_volume, "/runs": runs_volume})
+def survey_to_volume(run_id: str, seed: int, scenario: str) -> dict:
+    """Training-data survey: no chase camera, output stays on the uxo-runs Volume (nothing downloaded)."""
+    link_caches()
+    out = f"/runs/{run_id}"
+    os.makedirs(out, exist_ok=True)
+    t0 = time.time()
+    rc = run_isaac("sim/survey.py", "--out", out, "--seed", str(seed), "--scenario", scenario, "--no-chase",
+                   timeout=3300)
+    runs_volume.commit()
+    labels = os.path.join(out, "labels")
+    n = len(os.listdir(labels)) if os.path.isdir(labels) else 0
+    n_lab = sum(1 for f in os.listdir(labels) if os.path.getsize(os.path.join(labels, f))) if n else 0
+    return {"run_id": run_id, "rc": rc, "frames": n, "labelled": n_lab, "seconds": round(time.time() - t0)}
+
+
+@app.local_entrypoint()
+def batch(seeds: str = "10-21", scenarios: str = "clear_sand", tag: str = "train"):
+    """Many surveys in parallel, kept on the uxo-runs Volume:
+    python -P -m modal run infra/sim_jobs.py::batch --seeds 10-21 --scenarios clear_sand,half_buried
+    """
+    lo, hi = (int(v) for v in seeds.split("-"))
+    jobs = [(f"{tag}_{sc}_s{s}", s, sc) for sc in scenarios.split(",") for s in range(lo, hi + 1)]
+    print(f"launching {len(jobs)} surveys: {[j[0] for j in jobs]}")
+    total = 0
+    for res in survey_to_volume.starmap(jobs):
+        total += res["labelled"]
+        print(f"  {res}")
+    print(f"done: {len(jobs)} runs, {total} labelled frames, on Volume uxo-runs")
+
+
 @app.local_entrypoint()
 def main(seed: int = 3, scenario: str = "clear_sand", quick: bool = False, flip_azimuth: bool = False):
     run_id = f"oceansim_{scenario}_s{seed}" + ("_quick" if quick else "")

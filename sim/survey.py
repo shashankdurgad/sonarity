@@ -23,18 +23,21 @@ parser.add_argument("--seed", type=int, default=3)
 parser.add_argument("--scenario", default="clear_sand", choices=["clear_sand", "half_buried", "murky"])
 parser.add_argument("--quick", action="store_true", help="2 lanes, coarse steps, for testing")
 parser.add_argument("--flip-azimuth", action="store_true")
+parser.add_argument("--no-chase", action="store_true", help="skip the chase camera (faster batch data runs)")
 args, _ = parser.parse_known_args()
 
-from sim.session import SimSession  # noqa: E402  (boots nothing until constructed)
+from sim.session import SimSession, seabed_bounds_for  # noqa: E402  (boots nothing until constructed)
 
 import numpy as np  # noqa: E402
 
-from sim.objects import YOLO_NAMES, lawnmower, make_world, yolo_labels  # noqa: E402
+from sim.objects import YOLO_NAMES, get_world, lawnmower, survey_area, yolo_labels  # noqa: E402
 from sim.sonar_geometry import SonarParams  # noqa: E402
 
 t0 = time.time()
 p = SonarParams()
-sim = SimSession(sonar=p, flip_azimuth=args.flip_azimuth)
+world = get_world(args.seed, args.scenario)  # pure Python; decides the seabed size before Isaac starts
+sim = SimSession(sonar=p, flip_azimuth=args.flip_azimuth, chase=not args.no_chase,
+                 seabed_bounds=seabed_bounds_for(world))
 print(f"[survey] Isaac + sensors ready in {time.time() - t0:.0f}s", flush=True)
 
 from PIL import Image, ImageDraw  # noqa: E402
@@ -43,12 +46,11 @@ out = args.out
 for d in ("sonar", "cam", "chase", "labels", "_preview", "_preview_labels"):
     os.makedirs(os.path.join(out, d), exist_ok=True)
 
-world = make_world(args.seed, args.scenario)
 sim.load_world(world)
 with open(os.path.join(out, "world.json"), "w") as f:
     json.dump(world, f, indent=2)
 
-poses = lawnmower(altitude=p.altitude, **({"n_lanes": 2, "step": 1.5} if args.quick else {}))
+poses = lawnmower(altitude=p.altitude, area=survey_area(world), **({"n_lanes": 2, "step": 1.5} if args.quick else {}))
 print(f"[survey] {len(poses)} poses, scenario={args.scenario}, seed={args.seed}", flush=True)
 
 
