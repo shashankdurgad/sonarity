@@ -5,3 +5,6 @@
 __pycache__/
 runs/*/
 !runs/sample/
+out/
+out_*.log
+step1_report.txt
