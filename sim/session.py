@@ -29,7 +29,7 @@ OCEANSIM = "/isaac-sim/extsUser/OceanSim"
 CAM_RES = (640, 360)
 CAM_PITCH = 40.0  # deg down
 WATER_RGB = np.array([18, 62, 74], dtype=np.float32)  # murk colour (dark teal)
-REFLECTIVITY = {"seabed": 0.3, "aerial_bomb": 1.0, "sphere_mine": 1.0, "rock": 0.6, "tyre": 0.5}
+REFLECTIVITY = {"seabed": 0.1, "aerial_bomb": 1.0, "sphere_mine": 1.0, "rock": 0.6, "tyre": 0.5}
 COLOURS = {
     "aerial_bomb": (0.28, 0.22, 0.16), "sphere_mine": (0.20, 0.22, 0.20),
     "rock": (0.42, 0.41, 0.38), "tyre": (0.05, 0.05, 0.05),
@@ -37,7 +37,13 @@ COLOURS = {
 
 
 class SimSession:
-    def __init__(self, sonar: SonarParams = SonarParams(), flip_azimuth: bool = False, warmup: int = 20):
+    def __init__(self, sonar: SonarParams = SonarParams(), flip_azimuth: bool = False, warmup: int = 20,
+                 sun: float = 300.0, dome: float = 80.0, sonar_norm: str = "all",
+                 sonar_gamma: float = 1.0, sonar_gain: float = 8.0):
+        self._gamma = sonar_gamma
+        self.sonar_gain = sonar_gain
+        self._sun, self._dome, self._sonar_norm = sun, dome, sonar_norm
+        self._materials = {}
         from isaacsim import SimulationApp
 
         self.app = SimulationApp({"headless": True, "width": CAM_RES[0], "height": CAM_RES[1]})
@@ -61,8 +67,9 @@ class SimSession:
         self.World = World
         self.world_api = World(stage_units_in_meters=1.0)
         self.stage = omni.usd.get_context().get_stage()
-        UsdLux.DistantLight.Define(self.stage, "/World/Sun").CreateIntensityAttr(900.0)
-        UsdLux.DomeLight.Define(self.stage, "/World/Dome").CreateIntensityAttr(250.0)
+        self._sun_light = UsdLux.DistantLight.Define(self.stage, "/World/Sun")
+        self._dome_light = UsdLux.DomeLight.Define(self.stage, "/World/Dome")
+        self.set_lights(self._sun, self._dome)
         self._build_seabed()
         self._make_sensors()
 
@@ -73,14 +80,21 @@ class SimSession:
         add_labels(prim, labels=[f"{reflectivity}"], instance_name="reflectivity")
         add_labels(prim, labels=[cls], instance_name="class")
 
-    def _build_seabed(self, half: float = 45.0, res: float = 1.0, seed: int = 0):
+    def _build_seabed(self, half: float = 45.0, res: float = 0.5, seed: int = 0):
         from pxr import Gf, UsdGeom, Vt
 
         rng = np.random.default_rng(seed)
         xs = np.arange(-half + 16, half + 16 + 1e-6, res)
         n = len(xs)
         X, Y = np.meshgrid(xs, xs, indexing="ij")
-        Z = 0.04 * np.sin(X * 0.7) * np.cos(Y * 0.5) + 0.03 * rng.standard_normal(X.shape)
+        # Smooth long-wave undulation only: per-vertex height noise caused swirl artefacts in the sonar.
+        Z = 0.05 * np.sin(X * 0.21) * np.cos(Y * 0.17)
+        # Sand texture for the camera via per-vertex colour: ripples + patches + grain.
+        ripples = 0.5 + 0.5 * np.sin(X * 3.1 + 0.8 * np.sin(Y * 0.4))
+        patches = 0.5 + 0.5 * np.sin(X * 0.33 + 1.3) * np.sin(Y * 0.29 + 0.4)
+        shade = 0.78 + 0.12 * ripples + 0.12 * patches + 0.05 * rng.standard_normal(X.shape)
+        base = np.array([0.58, 0.52, 0.40])
+        cols = [Gf.Vec3f(*(base * s)) for s in np.clip(shade, 0.5, 1.2).ravel()]
         pts = [Gf.Vec3f(float(x), float(y), float(z)) for x, y, z in zip(X.ravel(), Y.ravel(), Z.ravel())]
         idx = []
         for i in range(n - 1):
@@ -92,8 +106,41 @@ class SimSession:
         mesh.CreateFaceVertexCountsAttr(Vt.IntArray([4] * ((n - 1) ** 2)))
         mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(idx))
         mesh.CreateSubdivisionSchemeAttr("none")
-        mesh.CreateDisplayColorAttr([Gf.Vec3f(0.55, 0.50, 0.38)])
+        mesh.CreateDisplayColorPrimvar(UsdGeom.Tokens.vertex).Set(Vt.Vec3fArray(cols))
+        self._bind(mesh.GetPrim(), self._material("seabed", primvar=True))
         self._label(mesh.GetPrim(), REFLECTIVITY["seabed"], "seabed")
+
+    def set_lights(self, sun: float, dome: float):
+        self._sun_light.CreateIntensityAttr().Set(float(sun))
+        self._dome_light.CreateIntensityAttr().Set(float(dome))
+
+    def _material(self, name: str, rgb=None, primvar: bool = False, roughness: float = 0.9):
+        """UsdPreviewSurface material; with primvar=True the diffuse colour comes from per-vertex displayColor."""
+        if name in self._materials:
+            return self._materials[name]
+        from pxr import Gf, Sdf, UsdShade
+
+        root = f"/World/Looks/{name}"
+        mat = UsdShade.Material.Define(self.stage, root)
+        sh = UsdShade.Shader.Define(self.stage, f"{root}/PBR")
+        sh.CreateIdAttr("UsdPreviewSurface")
+        sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
+        if primvar:
+            rd = UsdShade.Shader.Define(self.stage, f"{root}/colour")
+            rd.CreateIdAttr("UsdPrimvarReader_float3")
+            rd.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("displayColor")
+            rd.CreateOutput("result", Sdf.ValueTypeNames.Float3)
+            sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(rd.ConnectableAPI(), "result")
+        else:
+            sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*rgb))
+        mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+        self._materials[name] = mat
+        return mat
+
+    def _bind(self, prim, mat):
+        from pxr import UsdShade
+
+        UsdShade.MaterialBindingAPI.Apply(prim).Bind(mat)
 
     def _gprim(self, kind: str, path: str, cls: str, t=(0, 0, 0), s=(1, 1, 1), r=None, **attrs):
         from pxr import Gf, UsdGeom
@@ -106,6 +153,7 @@ class SimSession:
             g.AddRotateXYZOp().Set(Gf.Vec3f(*r))
         g.AddScaleOp().Set(Gf.Vec3f(*s))
         g.CreateDisplayColorAttr([Gf.Vec3f(*COLOURS[cls])])
+        self._bind(g.GetPrim(), self._material(cls, rgb=COLOURS[cls], roughness=0.6))
         self._label(g.GetPrim(), REFLECTIVITY[cls], cls)
         return g
 
@@ -179,7 +227,8 @@ class SimSession:
             prim_path="/World/rig_cam", resolution=CAM_RES, position=np.array([0, 0, p.altitude - 0.2]),
             orientation=self._q(np.array([0.0, CAM_PITCH, 0.0]), degrees=True))
         self.world_api.reset()
-        self.sonar.sonar_initialize(viewport=False, include_unlabelled=False)
+        # "all" = normalise over the whole image; the default "range" flattened object/seabed contrast.
+        self.sonar.sonar_initialize(normalizing_method=self._sonar_norm, viewport=False, include_unlabelled=False)
         # OceanSim's default water params (custom ones washed the image out to flat teal).
         self.cam.initialize(viewport=False)
         for _ in range(self._warmup):
@@ -199,10 +248,10 @@ class SimSession:
         """Render and return (sonar 512x512 uint8 fan, camera 360x640x3 uint8)."""
         for _ in range(settle_steps):
             self.world_api.step(render=True)
-        self.sonar.make_sonar_data()
+        self.sonar.make_sonar_data(intensity_gain=self.sonar_gain)
         polar = self.sonar.get_sonar_image()
         polar = polar.numpy() if hasattr(polar, "numpy") else np.asarray(polar)
-        fan = polar_to_fan(polar, self.p, flip_azimuth=self.flip_azimuth)
+        fan = polar_to_fan(polar, self.p, flip_azimuth=self.flip_azimuth, gamma=self._gamma)
         self.cam.render()
         frame = getattr(self.cam, "_uw_frame", None)
         if frame is None:

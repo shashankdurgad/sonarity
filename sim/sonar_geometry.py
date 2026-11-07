@@ -46,13 +46,17 @@ class SonarParams:
 DEFAULT = SonarParams()
 
 
-def polar_to_fan(polar: np.ndarray, p: SonarParams = DEFAULT, flip_azimuth: bool = False) -> np.ndarray:
+def polar_to_fan(polar: np.ndarray, p: SonarParams = DEFAULT, flip_azimuth: bool = False,
+                 gamma: float = 1.0) -> np.ndarray:
     """OceanSim sonar grid (n_range x n_azimuth[, C], row 0 = min_range) -> 512x512 uint8 fan.
 
     `flip_azimuth` swaps left/right if OceanSim's azimuth column 0 turns out to be starboard.
+    `gamma` < 1 lifts dim seabed returns (and so makes acoustic shadows visible) while keeping highlights.
     """
     if polar.ndim == 3:
         polar = polar[..., :3].mean(axis=2)
+    if gamma != 1.0:
+        polar = 255.0 * (np.clip(polar, 0, 255) / 255.0) ** gamma
     n_r, n_a = polar.shape
     rows, cols = np.mgrid[0:SIZE, 0:SIZE].astype(np.float32)
     dx = (cols - (SIZE - 1) / 2) * p.m_per_px          # starboard +
