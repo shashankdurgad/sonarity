@@ -223,3 +223,167 @@ The video is not anyone's job until the end: the team records it together from t
 - [ ] Gemini key tested with one JSON call
 - [ ] `CLAUDE.md`, stubs, `runs/sample/` and smoke test committed
 - [ ] Everyone runs `python run_demo.py` on stubs
+
+---
+
+## 11. Integration contract (everyone must follow this)
+
+Every step reads from and writes to `runs/<id>/`. If your output doesn't match the spec below, the next person's code will break. **Do not invent extra fields, rename keys, or change folder paths without a team agreement.**
+
+### Folder structure
+
+```
+runs/<id>/
+├── world.json              # P3 writes (ground truth, only for scoring)
+├── sonar/                  # P2+P3 write
+│   ├── 000000.png          # zero-padded 6 digits, greyscale, 512×512
+│   ├── 000001.png
+│   └── ...
+├── cam/                    # P2+P3 write
+│   ├── 000000.png          # same numbering as sonar, RGB, 640×360
+│   └── ...
+├── poses.csv               # P2+P3 write
+├── labels/                 # P3 writes (per-frame YOLO labels for training)
+│   ├── 000000.txt
+│   └── ...
+├── contacts.json           # Shashank/P4 write (detector output)
+├── crops/                  # Shashank/P4 write
+│   ├── c1.png
+│   └── ...
+├── imagined/               # P5 writes
+│   ├── c1_north_bomb.png
+│   ├── c1_north_rock.png
+│   └── ...
+├── inspections/            # P5 writes
+│   ├── c1_north.png
+│   └── ...
+├── viewpoints.json         # P5 writes
+├── targets.json            # P4 writes (final planner output)
+└── demo.mp4                # P5 writes (composed video)
+```
+
+### Field types and rules
+
+**poses.csv**
+```
+t,x,y,depth,yaw,frame
+0.0,10.0,5.0,2.5,0.0,sonar/000000.png
+```
+- `t`: float, seconds from start
+- `x`, `y`: float, metres, world coordinates
+- `depth`: float, metres below surface (positive down)
+- `yaw`: float, radians
+- `frame`: string, relative path to the sonar image for that pose
+
+**world.json**
+```json
+{
+  "seed": 3,
+  "scenario": "clear_sand",
+  "objects": [
+    {
+      "id": "o1",
+      "cls": "aerial_bomb",
+      "xyz": [42.0, 118.5, -0.2],
+      "yaw": 0.7,
+      "burial": 0.3
+    }
+  ]
+}
+```
+- `id`: string, `o` + integer, unique
+- `cls`: one of `aerial_bomb`, `sphere_mine`, `rock`, `tyre`
+- `xyz`: [float, float, float], world coords, z is seabed-relative (negative = buried)
+- `burial`: float, 0.0 to 1.0 (fraction of object below seabed)
+- `scenario`: one of `clear_sand`, `half_buried`, `murky`
+
+**contacts.json**
+```json
+[
+  {
+    "id": "c1",
+    "xy": [41.8, 118.9],
+    "size_m": [1.8, 0.5],
+    "cls": "mine_like",
+    "conf": 0.81,
+    "frame": "sonar/000412.png",
+    "crop": "crops/c1.png"
+  }
+]
+```
+- `id`: string, `c` + integer, unique
+- `xy`: [float, float], estimated world position
+- `size_m`: [float, float], estimated length and width in metres
+- `cls`: one of `mine_like`, `other`
+- `conf`: float, 0.0 to 1.0
+- `frame`: string, relative path to the sonar frame where it was detected
+- `crop`: string, relative path to the cropped sonar image
+
+**viewpoints.json**
+```json
+[
+  {
+    "contact_id": "c1",
+    "chosen": "north",
+    "scores": {"north": 0.72, "east": 0.31, "south": 0.68, "west": 0.29},
+    "imagined": {
+      "north": ["imagined/c1_north_bomb.png", "imagined/c1_north_rock.png"]
+    },
+    "inspection": "inspections/c1_north.png"
+  }
+]
+```
+- `contact_id`: must match an `id` in `contacts.json`
+- `chosen`: one of `north`, `east`, `south`, `west`
+- `scores`: dict of direction to float (0 to 1), higher = more informative
+- `imagined`: dict of direction to list of image paths (one per hypothesis: `_bomb`, `_rock`)
+- `inspection`: string, relative path to the actual inspection render from the chosen angle
+
+**targets.json**
+```json
+[
+  {
+    "contact_id": "c1",
+    "class": "UXO",
+    "confidence": 0.86,
+    "priority": 1,
+    "standoff_m": 50,
+    "reason": "Long, narrow return with a fin-like tail from the north view"
+  }
+]
+```
+- `contact_id`: must match an `id` in `contacts.json`
+- `class`: one of `UXO`, `non-UXO`, `uncertain`
+- `confidence`: float, 0.0 to 1.0
+- `priority`: integer, 1 = highest
+- `standoff_m`: float, suggested exclusion radius in metres
+- `reason`: string, one sentence
+
+### Image specs
+
+| Image | Size | Channels | Format |
+|---|---|---|---|
+| `sonar/*.png` | 512 x 512 | greyscale (1 channel) | PNG |
+| `cam/*.png` | 640 x 360 | RGB | PNG |
+| `crops/*.png` | variable, max 256 x 256 | greyscale | PNG |
+| `imagined/*.png` | 512 x 512 | greyscale | PNG |
+| `inspections/*.png` | 512 x 512 | greyscale | PNG |
+
+### Naming conventions
+
+- Frame filenames: 6-digit zero-padded (`000000.png`, `000001.png`, ...)
+- Contact IDs: `c1`, `c2`, ... (never reuse within a run)
+- Object IDs: `o1`, `o2`, ... (never reuse within a run)
+- Imagined filenames: `<contact_id>_<direction>_<hypothesis>.png` (e.g. `c1_north_bomb.png`)
+- Inspection filenames: `<contact_id>_<direction>.png`
+
+### Validation
+
+Before merging, check:
+1. All paths in JSON files point to files that actually exist in `runs/<id>/`
+2. All `contact_id` references in `viewpoints.json` and `targets.json` exist in `contacts.json`
+3. Every contact in `contacts.json` has exactly one entry in `targets.json`
+4. Image dimensions match the spec above
+5. `run_demo.py` completes without errors on `runs/sample/`
+
+**If you need to change any of these contracts, post it in the group chat and get a yes from P4 before pushing.**
