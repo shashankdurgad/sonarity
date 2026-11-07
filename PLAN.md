@@ -50,27 +50,36 @@ Each step reads and writes files in `runs/<id>/`. Only the two sim jobs and trai
 
 ## 3. Proving OceanSim on Modal (top priority)
 
-**Known facts:** the `nvcr.io/nvidia/isaac-sim:5.0.0` image exists, and OceanSim targets Isaac Sim 5.0. OceanSim has headless camera scripts, but no headless sonar script, so we write that.
+**Tested on Modal's L40S on 7 Nov (driver 610.57.04, on gVisor):**
 
-**Main unknown: rendering on Modal.** The sonar is built on an RTX camera, so it needs Vulkan. Modal runs containers on gVisor, which supports Vulkan only if the graphics capability is exposed, and we found no confirmation that Modal does this. Also, a forum report shows camera scripts crashing on a headless L40S with a too-new driver. Test this first.
+| Isaac Sim image | Vulkan | Headless render | Warp on CUDA |
+|---|---|---|---|
+| `5.0.0` | Sees the L40S | ❌ Segfault in the RTX renderer | ❌ Fails to start |
+| `5.1.0` | Not run on its own | ❌ Same RTX renderer crash | Not checked |
+| **`6.0.1` (use this)** | Works | ✅ Cube rendered | ✅ `cuda:0` |
+| `6.2.0` | Works | ✅ Cube rendered | ✅ `cuda:0` |
+
+**Do not use 5.x on Modal.** We can't change the driver.
+
+**Main unknown: OceanSim on 6.0.1.** OceanSim targets Isaac Sim 5.0, so expect small fixes for changed APIs. It has headless camera scripts but no headless sonar script, so we write that. Reproduce the render test with `ISAAC_TAG=6.0.1 modal run infra/step2_isaac_render.py`.
 
 | By | Step | Pass when |
 |---|---|---|
-| **17:30** | **1. GPU + Vulkan:** L40S container from the 5.0.0 image | `nvidia-smi` and `vulkaninfo --summary` both see the L40S. Record the driver version |
-| **18:15** | **2. Isaac renders:** headless script with a cube and camera | A PNG with the cube visible |
-| **19:15** | **3. OceanSim sonar:** extension in `/isaac-sim/extsUser`, `ImagingSonarSensor` aimed at a sphere | A sonar PNG with the sphere visible, plus an underwater camera PNG |
+| ✅ Done | **1. GPU + Vulkan:** L40S container | `nvidia-smi` and `vulkaninfo --summary` both see the L40S |
+| ✅ Done | **2. Isaac renders:** headless script with a cube and camera | A PNG with the cube visible, on 6.0.1 and 6.2.0 |
+| **19:15** | **3. OceanSim sonar on 6.0.1:** extension in `/isaac-sim/extsUser`, `ImagingSonarSensor` aimed at a sphere | A sonar PNG with the sphere visible, plus an underwater camera PNG |
 | **20:00** | **4. Survey pass (GATE A):** path over seabed with 4 objects | MP4 of sonar + camera with objects visible and labels saved |
 
 **Try these before calling it failed:**
-- Add `/etc/vulkan/icd.d/nvidia_icd.json` to the image, and unset `CUDA_VISIBLE_DEVICES`
-- Try the `5.1.0` image, then another RTX-capable Modal GPU type
-- Ask Modal support or their community about Vulkan, starting at step 1 if it fails
+- Patch OceanSim for the API changes in 6.0.1, then try `6.2.0`
+- Stub the UI imports in the sonar sensor, since it runs headless
+- Ask OceanSim's issues or Modal support if it's still stuck
 
 **Decision at 20:00:** if step 4 hasn't passed, write down what failed and what was tried. Then move to the Python sonar sim (§9), which takes about 1.5 hours and keeps everything downstream the same. If you have a decisive lead at 20:00, you can extend once to 20:30, which means dropping the hero-shot polish.
 
 **Setup notes:**
-- Run the image with `modal.Image.from_registry(..., add_python=...)` and start Isaac as a subprocess through `/isaac-sim/python.sh`. Set `ACCEPT_EULA=Y` and `PRIVACY_CONSENT=Y`
-- Keep the shader cache on a Volume so only the first start is slow
+- Follow `infra/step2_isaac_render.py`: `modal.Image.from_registry(..., add_python=...)`, `USER root`, start Isaac as a subprocess through `/isaac-sim/python.sh`, and set `ACCEPT_EULA=Y` and `PRIVACY_CONSENT=Y`
+- The first start takes about 2.5 minutes. Restore the shader cache from the `uxo-cache` Volume, where step 2 saved it
 - Use `modal shell` for debugging, but stop it when done, because it holds a GPU
 - **Don't use OceanSim's Google Drive assets:** use generated terrain and simple primitives with semantic labels. Start with the sonar at `max_range` about 10 m, `hori_res` about 1000, and altitude 2–3 m, then tune
 
@@ -80,21 +89,22 @@ Each step reads and writes files in `runs/<id>/`. Only the two sim jobs and trai
 
 | Part | Choice | Notes |
 |---|---|---|
-| Sim | OceanSim on Isaac Sim 5.0, Modal L40S | Forward-looking imaging sonar + underwater camera |
+| Sim | OceanSim on Isaac Sim 6.0.1, Modal L40S | Forward-looking imaging sonar + underwater camera |
 | Scene | Generated seabed; bomb (cylinder + fins), sphere mine, rock, tyre; some part-buried | Primitives keep it simple |
 | Scenarios | `clear_sand`, `half_buried`, `murky` | `murky` changes the camera only |
 | Detector | YOLOv8n, 2 classes: `mine_like`, `other` | Trained on Modal L40S |
 | Real sonar data | `rehan9599/drishti-sss`: 5,205 YOLO images, about 2 GB, CC-BY-SA-4.0 | Map `mine_cylinder` → `mine_like`; `shipwreck`, `submarine_pipeline`, `ghost_net` → `other` |
+| Real mine data | MILCO/NOMBO ([figshare](https://figshare.com/articles/dataset/_i_Side-scan_sonar_imaging_for_Mine_detection_i_/24574879)): 1,170 real side-scan images from a Gavia AUV, CC-BY-4.0, on the `uxo-data` Volume | Map MILCO → `mine_like`, NOMBO → `other`. Comparison with `drishti-sss` in progress |
 | Synthetic data | About 500–1,000 OceanSim frames, labelled from sim semantics | From the survey job |
 | Planner | Gemini, structured JSON output | Confirm the model name and key in the first hour. Fall back to a template if the API fails |
 | Chase shots | Extra Isaac camera in the survey job | Simple AUV prim. Optional |
 | World model (stretch) | Cosmos3-Edge (4B), zero-shot, pre-rendered for the hero contact | Only if Gate C is early. Labelled as a concept |
 
 **Training:**
-1. **Run 1:** `drishti-sss`, about 30 epochs. Record mAP on its test split. This doesn't depend on the sim, so it starts right away.
+1. **Run 1:** real sonar data (MILCO/NOMBO and/or `drishti-sss`, once compared), about 30 epochs. Record mAP on its test split. This doesn't depend on the sim, so it starts right away.
 2. **Run 2:** continue on OceanSim frames + real data, about 20 epochs. Record mAP on held-out seeds.
 
-`drishti-sss` is side-scan sonar and OceanSim is forward-looking, so run 1 won't transfer well. **Run 2 is the one the demo needs.** Report the two scores separately. Expect 1–2 GPU-hours total.
+Both real datasets are side-scan sonar and OceanSim is forward-looking, so run 1 won't transfer well. **Run 2 is the one the demo needs.** Report the two scores separately. Expect 1–2 GPU-hours total.
 
 **Budget:** $500 Modal credit, with a $450 limit. Expect to spend **under $60**.
 
@@ -105,7 +115,7 @@ Each step reads and writes files in `runs/<id>/`. Only the two sim jobs and trai
 | Person | Owns | First deliverable |
 |---|---|---|
 | **Shashank:** training + Modal | `perception/`, Modal account and spend, Cosmos stretch | YOLO run 1 by 18:30 |
-| **P2:** OceanSim on Modal | `modal/`, steps 1–3 in §3, `sim/survey.py` job | Step 1 by 17:30 |
+| **P2:** OceanSim on Modal | `infra/`, step 3 in §3, `sim/survey.py` job | OceanSim sonar on 6.0.1 by 19:15 |
 | **P3:** scene + data | `sim/scene.py`, scenarios, labelled frames | Step 4 with P2 by 20:00 |
 | **P4:** planner + integration | `agent/planner.py`, `run_demo.py`, `viz/metrics.py`, smoke test, merges, calling cuts | Pipeline on stubs by 18:00 |
 | **P5:** imagination + demo output | `agent/imagine.py`, `sim/visit.py`, `viz/compose.py` | Angle scoring and `compose.py` on sample files by 19:00 |
@@ -173,7 +183,7 @@ The video is not anyone's job until the end: the team records it together from t
 ```
 ├── CLAUDE.md          # rules for every Claude session
 ├── run_demo.py        # runs every step, Modal jobs included
-├── modal/{image.py, sim_jobs.py, train_jobs.py}
+├── infra/{image.py, sim_jobs.py, train_jobs.py}  # not modal/, which can clash with `import modal`
 ├── sim/{scene.py, survey.py, visit.py}
 ├── perception/{train.py, detect.py}
 ├── agent/{imagine.py, planner.py}
@@ -218,8 +228,8 @@ The video is not anyone's job until the end: the team records it together from t
 
 - [ ] Names assigned to P2–P5, everyone can push
 - [ ] Modal installed, workspace shared, $450 limit set
-- [ ] L40S container from `isaac-sim:5.0.0` running; `vulkaninfo` result posted to the team
-- [ ] Hugging Face token; `drishti-sss` downloading on Modal
+- [x] L40S container running; Vulkan and Isaac render proven on `isaac-sim:6.0.1`
+- [ ] Hugging Face token; both real datasets on the `uxo-data` Volume
 - [ ] Gemini key tested with one JSON call
 - [ ] `CLAUDE.md`, stubs, `runs/sample/` and smoke test committed
 - [ ] Everyone runs `python run_demo.py` on stubs
