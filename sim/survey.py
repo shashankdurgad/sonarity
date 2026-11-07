@@ -40,7 +40,7 @@ print(f"[survey] Isaac + sensors ready in {time.time() - t0:.0f}s", flush=True)
 from PIL import Image, ImageDraw  # noqa: E402
 
 out = args.out
-for d in ("sonar", "cam", "labels", "_preview", "_preview_labels"):
+for d in ("sonar", "cam", "chase", "labels", "_preview", "_preview_labels"):
     os.makedirs(os.path.join(out, d), exist_ok=True)
 
 world = make_world(args.seed, args.scenario)
@@ -52,7 +52,7 @@ poses = lawnmower(altitude=p.altitude, **({"n_lanes": 2, "step": 1.5} if args.qu
 print(f"[survey] {len(poses)} poses, scenario={args.scenario}, seed={args.seed}", flush=True)
 
 
-def preview(i, sonar, cam, pose, lines, path):
+def preview(i, sonar, cam, chase, pose, lines, path):
     s = Image.fromarray(sonar).convert("RGB")
     if lines:
         d = ImageDraw.Draw(s)
@@ -62,13 +62,18 @@ def preview(i, sonar, cam, pose, lines, path):
             col = (255, 80, 80) if c == "0" else (80, 220, 255)
             d.rectangle([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], outline=col, width=2)
             d.text((cx - w / 2, cy - h / 2 - 12), YOLO_NAMES[int(c)], fill=col)
-    canvas = Image.new("RGB", (512 + 640, 512), (0, 0, 0))
-    canvas.paste(s, (0, 0))
-    canvas.paste(Image.fromarray(cam), (512, 76))
+    # Layout 1152x720: sonar left (centred), camera top-right, chase view bottom-right.
+    canvas = Image.new("RGB", (512 + 640, 720), (0, 0, 0))
+    canvas.paste(s, (0, 104))
+    canvas.paste(Image.fromarray(cam), (512, 0))
+    if chase is not None:
+        canvas.paste(Image.fromarray(chase), (512, 360))
     d = ImageDraw.Draw(canvas)
     d.text((8, 8), f"SIMULATED  frame {i:06d}  x={pose['x']:.1f} y={pose['y']:.1f} "
                    f"yaw={np.degrees(pose['yaw']):.0f}  {args.scenario}", fill=(255, 255, 255))
-    d.text((520, 56), "underwater camera", fill=(200, 200, 200))
+    d.text((8, 90), "forward-looking sonar", fill=(200, 200, 200))
+    d.text((520, 8), "underwater camera", fill=(255, 255, 255))
+    d.text((520, 368), "chase view", fill=(255, 255, 255))
     canvas.save(path)
 
 
@@ -77,15 +82,18 @@ t1 = time.time()
 for i, pose in enumerate(poses):
     sim.move_to(pose["x"], pose["y"], pose["yaw"])
     sonar, cam = sim.observe()
+    chase = sim.chase()
     name = f"{i:06d}"
     Image.fromarray(sonar, mode="L").save(os.path.join(out, "sonar", f"{name}.png"))
     Image.fromarray(cam).save(os.path.join(out, "cam", f"{name}.png"))
+    if chase is not None:
+        Image.fromarray(chase).save(os.path.join(out, "chase", f"{name}.png"))
     lines = yolo_labels(sim.world, pose, p)
     with open(os.path.join(out, "labels", f"{name}.txt"), "w") as f:
         f.write("\n".join(lines) + ("\n" if lines else ""))
     rows.append({**pose, "frame": f"sonar/{name}.png"})
-    preview(i, sonar, cam, pose, [], os.path.join(out, "_preview", f"{name}.png"))
-    preview(i, sonar, cam, pose, lines, os.path.join(out, "_preview_labels", f"{name}.png"))
+    preview(i, sonar, cam, chase, pose, [], os.path.join(out, "_preview", f"{name}.png"))
+    preview(i, sonar, cam, chase, pose, lines, os.path.join(out, "_preview_labels", f"{name}.png"))
     if i % 25 == 0:
         print(f"[survey] {i}/{len(poses)} ({(time.time() - t1) / (i + 1):.2f}s/frame)", flush=True)
 

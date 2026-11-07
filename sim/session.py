@@ -28,6 +28,7 @@ from sim.sonar_geometry import SonarParams, polar_to_fan  # noqa: E402
 OCEANSIM = "/isaac-sim/extsUser/OceanSim"
 CAM_RES = (640, 360)
 CAM_PITCH = 40.0  # deg down
+CHASE_BACK, CHASE_UP, CHASE_PITCH = 4.5, 2.2, 28.0  # chase camera: metres behind / above the rig, deg down
 WATER_RGB = np.array([18, 62, 74], dtype=np.float32)  # murk colour (dark teal)
 REFLECTIVITY = {"seabed": 0.1, "aerial_bomb": 1.0, "sphere_mine": 1.0, "rock": 0.6, "tyre": 0.5}
 COLOURS = {
@@ -39,7 +40,10 @@ COLOURS = {
 class SimSession:
     def __init__(self, sonar: SonarParams = SonarParams(), flip_azimuth: bool = False, warmup: int = 20,
                  sun: float = 300.0, dome: float = 80.0, sonar_norm: str = "all",
-                 sonar_gamma: float = 1.0, sonar_gain: float = 8.0):
+                 sonar_gamma: float = 1.0, sonar_gain: float = 8.0, chase: bool = True):
+        self._chase_enabled = chase
+        self.chase_cam = None
+        self._auv = None
         self._gamma = sonar_gamma
         self.sonar_gain = sonar_gain
         self._sun, self._dome, self._sonar_norm = sun, dome, sonar_norm
@@ -226,11 +230,19 @@ class SimSession:
         self.cam = UW_Camera(
             prim_path="/World/rig_cam", resolution=CAM_RES, position=np.array([0, 0, p.altitude - 0.2]),
             orientation=self._q(np.array([0.0, CAM_PITCH, 0.0]), degrees=True))
+        if self._chase_enabled:
+            self._build_auv()
+            self.chase_cam = UW_Camera(
+                prim_path="/World/chase_cam", resolution=CAM_RES,
+                position=np.array([-CHASE_BACK, 0, p.altitude + CHASE_UP]),
+                orientation=self._q(np.array([0.0, CHASE_PITCH, 0.0]), degrees=True))
         self.world_api.reset()
         # "all" = normalise over the whole image; the default "range" flattened object/seabed contrast.
         self.sonar.sonar_initialize(normalizing_method=self._sonar_norm, viewport=False, include_unlabelled=False)
         # OceanSim's default water params (custom ones washed the image out to flat teal).
         self.cam.initialize(viewport=False)
+        if self.chase_cam is not None:
+            self.chase_cam.initialize(viewport=False)
         for _ in range(self._warmup):
             self.world_api.step(render=True)
 
@@ -243,6 +255,53 @@ class SimSession:
         cx, cy = x - 0.1 * math.cos(yaw), y - 0.1 * math.sin(yaw)
         self.cam.set_world_pose(position=np.array([cx, cy, alt - 0.2]),
                                 orientation=self._q(np.array([0.0, CAM_PITCH, deg]), degrees=True))
+        if self._auv is not None:
+            from pxr import Gf
+
+            ops = self._auv.GetOrderedXformOps()
+            ops[0].Set(Gf.Vec3d(x, y, alt - 0.1))
+            ops[1].Set(deg)
+        if self.chase_cam is not None:
+            bx, by = x - CHASE_BACK * math.cos(yaw), y - CHASE_BACK * math.sin(yaw)
+            self.chase_cam.set_world_pose(position=np.array([bx, by, alt + CHASE_UP]),
+                                          orientation=self._q(np.array([0.0, CHASE_PITCH, deg]), degrees=True))
+
+    def _build_auv(self):
+        """Yellow torpedo AUV whose nose sits at the sensor rig. Not labelled, so the sonar ignores it."""
+        from pxr import Gf, UsdGeom
+
+        root = "/World/AUV"
+        self._auv = UsdGeom.Xform.Define(self.stage, root)
+        self._auv.AddTranslateOp().Set(Gf.Vec3d(0, 0, self.p.altitude - 0.1))
+        self._auv.AddRotateZOp().Set(0.0)
+        yellow = self._material("auv_yellow", rgb=(0.95, 0.72, 0.08), roughness=0.4)
+        dark = self._material("auv_dark", rgb=(0.08, 0.08, 0.09), roughness=0.5)
+
+        def part(kind, name, mat, t, s=(1, 1, 1), **attrs):
+            g = getattr(UsdGeom, kind).Define(self.stage, f"{root}/{name}")
+            for k, v in attrs.items():
+                getattr(g, f"Create{k}Attr")(v)
+            g.AddTranslateOp().Set(Gf.Vec3d(*t))
+            g.AddScaleOp().Set(Gf.Vec3f(*s))
+            self._bind(g.GetPrim(), mat)
+
+        part("Cylinder", "hull", yellow, (-0.9, 0, 0), Axis="X", Radius=0.17, Height=1.4)
+        part("Sphere", "nose", dark, (-0.2, 0, 0), s=(1.5, 1, 1), Radius=0.17)
+        part("Cone", "tail", yellow, (-1.75, 0, 0), s=(-1, 1, 1), Axis="X", Radius=0.17, Height=0.3)
+        part("Cube", "fin_v", dark, (-1.65, 0, 0), s=(0.22, 0.015, 0.55), Size=1.0)
+        part("Cube", "fin_h", dark, (-1.65, 0, 0), s=(0.22, 0.55, 0.015), Size=1.0)
+        part("Cylinder", "prop", dark, (-1.95, 0, 0), Axis="X", Radius=0.1, Height=0.05)
+        part("Cylinder", "mast", dark, (-0.5, 0, 0.2), Axis="Z", Radius=0.025, Height=0.15)
+
+    def chase(self) -> np.ndarray | None:
+        """Third-person view of the AUV (360x640x3 uint8) from the latest render; None if disabled."""
+        if self.chase_cam is None:
+            return None
+        self.chase_cam.render()
+        frame = getattr(self.chase_cam, "_uw_frame", None)
+        if frame is None:
+            return np.zeros((CAM_RES[1], CAM_RES[0], 3), np.uint8)
+        return self._apply_murk(np.asarray(frame)[..., :3].astype(np.uint8))
 
     def observe(self, settle_steps: int = 3) -> tuple[np.ndarray, np.ndarray]:
         """Render and return (sonar 512x512 uint8 fan, camera 360x640x3 uint8)."""
