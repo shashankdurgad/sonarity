@@ -40,16 +40,14 @@ def step_sim(run_dir: str, **_):
 
 
 def step_detect(run_dir: str, **_):
-    """Run the YOLO detector. Stub: checks contacts.json exists."""
+    """Run the YOLO detector on sonar frames."""
     contacts_path = os.path.join(run_dir, "contacts.json")
     if not os.path.exists(contacts_path):
-        # Try importing the real detector
-        try:
-            from perception.detect import run as detect_run
-            detect_run(run_dir)
-        except ImportError:
-            print(f"[detect] STUB: {contacts_path} not found and perception.detect unavailable.")
-            return False
+        from perception.detect import run as detect_run
+        detect_run(run_dir)
+    if not os.path.exists(contacts_path):
+        print(f"[detect] FAIL: {contacts_path} not produced")
+        return False
     with open(contacts_path) as f:
         contacts = json.load(f)
     print(f"[detect] {len(contacts)} contacts")
