@@ -1,0 +1,17 @@
+{
+  "scenario": "clear_sand",
+  "seed": 1,
+  "gt_objects": 4,
+  "gt_uxo": 2,
+  "gt_non_uxo": 2,
+  "contacts_detected": 2,
+  "detection_rate": 0.5,
+  "classification_accuracy": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "tp": 1,
+  "fp": 0,
+  "fn": 0,
+  "tn": 1,
+  "missed_uxo": 1
+}

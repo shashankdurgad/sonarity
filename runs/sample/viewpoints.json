@@ -1,0 +1,36 @@
+[
+  {
+    "contact_id": "c1",
+    "chosen": "north",
+    "scores": {
+      "north": 0.72,
+      "east": 0.31,
+      "south": 0.68,
+      "west": 0.29
+    },
+    "imagined": {
+      "north": [
+        "imagined/c1_north_bomb.png",
+        "imagined/c1_north_rock.png"
+      ]
+    },
+    "inspection": "inspections/c1_north.png"
+  },
+  {
+    "contact_id": "c2",
+    "chosen": "east",
+    "scores": {
+      "north": 0.4,
+      "east": 0.65,
+      "south": 0.38,
+      "west": 0.55
+    },
+    "imagined": {
+      "east": [
+        "imagined/c2_east_bomb.png",
+        "imagined/c2_east_rock.png"
+      ]
+    },
+    "inspection": "inspections/c2_east.png"
+  }
+]

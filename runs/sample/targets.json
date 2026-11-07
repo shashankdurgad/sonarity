@@ -1,0 +1,18 @@
+[
+  {
+    "contact_id": "c1",
+    "class": "UXO",
+    "confidence": 0.64,
+    "priority": 1,
+    "standoff_m": 50,
+    "reason": "Sonar return consistent with mine-like object"
+  },
+  {
+    "contact_id": "c2",
+    "class": "non-UXO",
+    "confidence": 0.5,
+    "priority": 2,
+    "standoff_m": 0,
+    "reason": "Shape and reflectivity consistent with natural debris"
+  }
+]

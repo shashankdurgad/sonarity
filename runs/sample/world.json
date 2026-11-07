@@ -1,0 +1,50 @@
+{
+  "seed": 1,
+  "scenario": "clear_sand",
+  "objects": [
+    {
+      "id": "o1",
+      "cls": "aerial_bomb",
+      "xyz": [
+        20.0,
+        30.0,
+        -0.1
+      ],
+      "yaw": 0.5,
+      "burial": 0.2
+    },
+    {
+      "id": "o2",
+      "cls": "rock",
+      "xyz": [
+        40.0,
+        15.0,
+        0.0
+      ],
+      "yaw": 0.0,
+      "burial": 0.0
+    },
+    {
+      "id": "o3",
+      "cls": "tyre",
+      "xyz": [
+        55.0,
+        45.0,
+        0.0
+      ],
+      "yaw": 1.2,
+      "burial": 0.0
+    },
+    {
+      "id": "o4",
+      "cls": "sphere_mine",
+      "xyz": [
+        70.0,
+        25.0,
+        -0.3
+      ],
+      "yaw": 0.0,
+      "burial": 0.4
+    }
+  ]
+}

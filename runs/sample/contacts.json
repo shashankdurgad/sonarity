@@ -1,0 +1,32 @@
+[
+  {
+    "id": "c1",
+    "xy": [
+      20.3,
+      30.2
+    ],
+    "size_m": [
+      1.8,
+      0.5
+    ],
+    "cls": "mine_like",
+    "conf": 0.85,
+    "frame": "sonar/000002.png",
+    "crop": "crops/c1.png"
+  },
+  {
+    "id": "c2",
+    "xy": [
+      40.1,
+      14.8
+    ],
+    "size_m": [
+      0.8,
+      0.7
+    ],
+    "cls": "other",
+    "conf": 0.72,
+    "frame": "sonar/000004.png",
+    "crop": "crops/c2.png"
+  }
+]
