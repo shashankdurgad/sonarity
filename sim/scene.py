@@ -1,7 +1,7 @@
-"""P3 scene data + OpenUSD geometry; no Isaac imports at module-import time.
+"""Survey scene data + OpenUSD geometry; no Isaac imports at module-import time.
 
-Laptop: python -m sim.scene --seed 1 --scenario clear_sand --out runs/p3_scene/world.json
-Isaac:  build_scene(stage, world) AFTER P2 starts SimulationApp.
+Laptop: python -m sim.scene --seed 1 --scenario clear_sand --out runs/clear_sand_seed001/world.json
+Isaac:  build_scene(stage, world) AFTER the simulator starts SimulationApp.
 
 Coordinates: metres, Z-up, yaw radians about +Z. xyz[2] is the object's
 BOTTOM-anchor offset from a flat seabed, NOT water-surface depth. Burial is
@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path
 import random
+import re
 
 CLASSES = ("aerial_bomb", "sphere_mine", "rock", "tyre")
 SCENARIOS = ("clear_sand", "half_buried", "murky")
@@ -33,7 +34,7 @@ def validate_world(world):
         if not isinstance(obj, dict) or set(obj) != {"id", "cls", "xyz", "yaw", "burial"}:
             raise ValueError("object must have id, cls, xyz, yaw, burial")
         oid = obj["id"]
-        if not isinstance(oid, str) or not oid.startswith("o") or not oid[1:].isdigit() or oid in seen:
+        if not isinstance(oid, str) or not re.fullmatch(r"o[1-9][0-9]*", oid) or oid in seen:
             raise ValueError("IDs must be unique o1, o2, ...")
         seen.add(oid)
         if obj["cls"] not in CLASSES:
@@ -52,12 +53,13 @@ def make_world(seed=1, scenario="clear_sand"):
     """Seed 1 clear_sand matches the supplied sample object's layout exactly.
 
     Other seeds jitter each anchor by up to 3 m and vary yaw. Every scene has
-    four objects. Sensor range is ~10 m: P2 must actually pass near these anchors.
-    murky changes metadata only; P2 owns applying camera turbidity.
+    four objects. Typical configured sensor range is ~10 m: the survey path must actually pass near these anchors.
+    murky changes metadata only; the sensor renderer must apply actual camera turbidity.
     """
     if type(seed) is not int or scenario not in SCENARIOS:
         raise ValueError("Invalid seed or scenario")
     rng = random.Random(seed)
+    burial_rng = random.Random(seed ^ 0x5EABED)
     anchors = [(20.0, 30.0), (40.0, 15.0), (55.0, 45.0), (70.0, 25.0)]
     classes = ["aerial_bomb", "rock", "tyre", "sphere_mine"]
     yaws = [0.5, 0.0, 1.2, 0.0]
@@ -69,7 +71,7 @@ def make_world(seed=1, scenario="clear_sand"):
             x += rng.uniform(-3, 3)
             y += rng.uniform(-3, 3)
             yaw = rng.uniform(-math.pi, math.pi)
-        burial = rng.uniform(0.25, 0.55) if scenario == "half_buried" else base_burial[i]
+        burial = burial_rng.uniform(0.25, 0.55) if scenario == "half_buried" else base_burial[i]
         z = -HEIGHTS_M[cls] * burial
         objects.append({"id": f"o{i+1}", "cls": cls,
                         "xyz": [round(x, 6), round(y, 6), round(z, 6)],
@@ -93,15 +95,15 @@ def _usd():
     try:
         from pxr import Gf, Sdf, UsdGeom, UsdShade
     except ImportError as exc:
-        raise RuntimeError("Geometry needs P2's Isaac/OpenUSD runtime. Start SimulationApp first.") from exc
+        raise RuntimeError("Geometry needs the Isaac/OpenUSD runtime. Start SimulationApp first.") from exc
     return Gf, Sdf, UsdGeom, UsdShade
 
 
 def _tag(prim, obj):
-    """GT hooks only; these custom attributes are NOT a sonar annotation API."""
+    """Ground-truth hooks only; these custom attributes are NOT a sonar annotation API."""
     _, Sdf, _, _ = _usd()
-    prim.CreateAttribute("p3:object_id", Sdf.ValueTypeNames.String).Set(obj["id"])
-    prim.CreateAttribute("p3:class", Sdf.ValueTypeNames.String).Set(obj["cls"])
+    prim.CreateAttribute("survey:object_id", Sdf.ValueTypeNames.String).Set(obj["id"])
+    prim.CreateAttribute("survey:class", Sdf.ValueTypeNames.String).Set(obj["cls"])
 
 
 def _paint(stage, shape, color):
@@ -160,14 +162,14 @@ def _tyre_mesh(stage, path, color):
     return mesh
 
 
-def add_object(stage, obj, *, parent_path="/World/P3Scene/Objects", seabed_z=0.0,
+def add_object(stage, obj, *, parent_path="/World/SurveySite/Objects", seabed_z=0.0,
                scale_xyz=(1.0, 1.0, 1.0), semantic_labeler=None):
     """Create one visual proxy and return its root prim path.
 
-    P5 may call this with a HYPOTHETICAL obj, rather than a real world.json row.
+    Inspection code may call this with a HYPOTHETICAL obj, rather than a real world.json row.
     semantic_labeler is an optional callback (prim, class_name, object_id) owned
-    by P2; it must use the actual renderer's supported semantic-label mechanism.
-    Scaling changes proxy dimensions; P5 computes scale from detected size.
+    by the simulator; it must use the actual renderer's supported semantic-label mechanism.
+    Scaling changes proxy dimensions; Inspection code computes scale from detected size.
     """
     validate_world({"seed": 1, "scenario": "clear_sand", "objects": [obj]})
     if len(scale_xyz) != 3 or not all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in scale_xyz):
@@ -211,23 +213,23 @@ def add_object(stage, obj, *, parent_path="/World/P3Scene/Objects", seabed_z=0.0
     return path
 
 
-def build_scene(stage, world, *, root_path="/World/P3Scene", seabed_z=0.0, semantic_labeler=None):
-    """Build a flat seabed + objects in a metre-scale, Z-up stage supplied by P2.
+def build_scene(stage, world, *, root_path="/World/SurveySite", seabed_z=0.0, semantic_labeler=None):
+    """Build a flat seabed + objects in a metre-scale, Z-up stage supplied by the simulation job.
 
-    The root must be dedicated to P3 assets. Rebuild removes only that subtree;
-    put cameras/sensors elsewhere. Existing origin/lighting/camera setup is P2's.
+    The root must be dedicated to survey assets. Rebuild removes only that subtree;
+    put cameras/sensors elsewhere. Existing origin/lighting/camera setup belongs to the simulation job.
     No rigid-body physics is added because this plan uses static scene objects.
     """
     validate_world(world)
     if not root_path.startswith("/World/") or root_path == "/World/" or root_path.endswith("/"):
-        raise ValueError("Use a dedicated path such as /World/P3Scene")
+        raise ValueError("Use a dedicated path such as /World/SurveySite")
     if not math.isfinite(seabed_z):
         raise ValueError("seabed_z must be finite")
     _, _, UsdGeom, _ = _usd()
     if UsdGeom.GetStageUpAxis(stage) != UsdGeom.Tokens.z:
-        raise ValueError("P3 expects a Z-up stage; agree this with P2")
+        raise ValueError("Scene expects a Z-up stage; agree this with the simulator owner")
     if not math.isclose(UsdGeom.GetStageMetersPerUnit(stage), 1.0):
-        raise ValueError("P3 expects metresPerUnit=1; agree this with P2")
+        raise ValueError("Scene expects metresPerUnit=1; agree this with the simulator owner")
     if stage.GetPrimAtPath(root_path):
         stage.RemovePrim(root_path)
     UsdGeom.Xform.Define(stage, root_path)
@@ -242,10 +244,10 @@ def build_scene(stage, world, *, root_path="/World/P3Scene", seabed_z=0.0, seman
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Write P3 world data without Isaac or GPU dependencies")
+    parser = argparse.ArgumentParser(description="Write survey scene data without Isaac or GPU dependencies")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--scenario", choices=SCENARIOS, default="clear_sand")
-    parser.add_argument("--out", type=Path, default=Path("runs/p3_scene/world.json"))
+    parser.add_argument("--out", type=Path, default=Path("runs/clear_sand_seed001/world.json"))
     parser.add_argument("--force", action="store_true", help="Overwrite this output file if it exists")
     args = parser.parse_args()
     world = make_world(args.seed, args.scenario)
@@ -254,7 +256,7 @@ def main():
     except FileExistsError:
         parser.error(f"{args.out} already exists; use another output path or --force intentionally")
     print(f"Wrote {args.out} ({len(world['objects'])} objects, {world['scenario']}, seed {world['seed']})")
-    print("Scene data only. P2 must render sonar/camera/poses; this is not a complete survey run.")
+    print("Scene data only. The simulation job must render sonar/camera/poses; this is not a complete survey run.")
 
 
 if __name__ == "__main__":

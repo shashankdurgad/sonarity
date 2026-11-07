@@ -1,7 +1,7 @@
-"""Check P3 run-file structure. Does not judge sonar realism or label accuracy.
+"""Check survey run-file structure. Does not judge sonar realism or label accuracy.
 
-Usage: python validate_p3_run.py runs/p3_check --overlays p3_qa
-Dependency: python -m pip install Pillow
+Usage: python validate_run.py runs/clear_sand_seed001 --overlays run_qa
+Dependency: Pillow for full image checking; scene-only mode uses the standard library.
 Class IDs assumed: 0=mine_like, 1=other. Confirm with the training owner.
 """
 import argparse
@@ -12,14 +12,13 @@ import re
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw
 
 
 def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def validate(root, overlays=None):
+def validate(root, overlays=None, scene_only=False):
     errors = []
     root = Path(root)
     if not root.is_dir():
@@ -52,6 +51,13 @@ def validate(root, overlays=None):
                 raise ValueError(f"invalid burial for {oid}")
     except (OSError, ValueError, TypeError, KeyError) as exc:
         errors.append(f"world.json: {exc}")
+
+    if scene_only:
+        return errors, 0
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return errors + ["Full image validation needs Pillow: python -m pip install Pillow"], 0
 
     sonar = sorted((root / "sonar").glob("*.png"))
     if not sonar:
@@ -145,16 +151,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run", type=Path)
     parser.add_argument("--overlays", type=Path, help="Optional NEW QA output folder, outside sonar/ and cam/")
+    parser.add_argument("--scene-only", action="store_true", help="Check world.json only; no image dependencies needed")
     args = parser.parse_args()
+    if args.scene_only and args.overlays is not None:
+        parser.error("--overlays requires full-run validation")
     if args.overlays is not None:
         a, b = args.run.resolve(), args.overlays.resolve()
         if b == a or a in b.parents:
             parser.error("Keep overlays outside the run folder to avoid modifying training inputs")
-    errors, count = validate(args.run, args.overlays)
+    errors, count = validate(args.run, args.overlays, scene_only=args.scene_only)
     for error in errors:
         print(f"ERROR: {error}")
     if errors:
         print(f"FAIL: {len(errors)} issue(s)")
         sys.exit(1)
+    if args.scene_only:
+        print(f"PASS: {args.run / 'world.json'} has valid scene-data structure")
+        print("Images, labels and poses were not checked in scene-only mode.")
+        sys.exit(0)
     print(f"PASS: {count} aligned sonar/camera/label frames and valid world/poses structure")
     print("Structural checks only: inspect overlays to verify sonar boxes and visibility by eye.")
