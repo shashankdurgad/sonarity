@@ -152,7 +152,7 @@ The video is not anyone's job until the end: the team records it together from t
  "objects": [{"id": "o1", "cls": "aerial_bomb", "xyz": [42.0, 118.5, -0.2], "yaw": 0.7, "burial": 0.3}]}
 
 // contacts.json
-[{"id": "c1", "xy": [41.8, 118.9], "size_m": [1.8, 0.5], "cls": "mine_like", "conf": 0.81,
+[{"id": "c1", "xy": [41.8, 118.9], "yaw": 0.7, "size_m": [1.8, 0.5], "cls": "mine_like", "conf": 0.81,
   "frame": "sonar/000412.png", "crop": "crops/c1.png"}]
 
 // viewpoints.json
@@ -303,6 +303,7 @@ t,x,y,depth,yaw,frame
   {
     "id": "c1",
     "xy": [41.8, 118.9],
+    "yaw": 0.7,
     "size_m": [1.8, 0.5],
     "cls": "mine_like",
     "conf": 0.81,
@@ -313,6 +314,7 @@ t,x,y,depth,yaw,frame
 ```
 - `id`: string, `c` + integer, unique
 - `xy`: [float, float], estimated world position
+- `yaw`: float, radians, estimated heading of the object
 - `size_m`: [float, float], estimated length and width in metres
 - `cls`: one of `mine_like`, `other`
 - `conf`: float, 0.0 to 1.0

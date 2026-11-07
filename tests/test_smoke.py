@@ -65,6 +65,7 @@ def test_contacts_json():
         assert c["id"] not in ids
         ids.add(c["id"])
         assert len(c["xy"]) == 2
+        assert isinstance(c["yaw"], (int, float))
         assert len(c["size_m"]) == 2
         assert c["cls"] in VALID_DET_CLASSES
         assert 0.0 <= c["conf"] <= 1.0
