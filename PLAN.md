@@ -1,333 +1,225 @@
-# "Look Before You Dive" — 24h Hackathon Plan
-### An autonomous underwater robot that surveys North Sea wind-farm sites for unexploded WWII ordnance
+# "Look Before You Dive": proof-of-concept plan
+**A simulated underwater robot surveys a North Sea wind-farm site in OceanSim, finds suspicious objects, works out the best angle to check each one, and hands humans a prioritised target list. It never touches anything.**
+
+**Deadline: submit by 01:45, hard stop 02:00, Sunday 8 Nov (GMT).** Goal: a believable demo that shows the direction, not a robust system.
+
+The original 24-hour plan is in git history (`git show be98c51:PLAN.md`).
 
 ---
 
-## In plain English: what this project is
+## 1. What changed
 
-**The problem.** Up to about 1.3 million tonnes of wartime munitions are thought to lie on or just under the North Sea seabed, exactly where the UK and its neighbours are building offshore wind farms. Before anyone can lay a cable or sink a foundation, the seabed has to be surveyed and every suspicious object checked. Today that means a survey ship towing sonar for weeks, specialists manually reviewing the data, and divers or remote vehicles sent back to re-inspect each suspicious contact. It is slow, expensive, and the hardest part is telling a bomb from a rock, a tyre or a lump of pipe.
-
-**What we build.** A simulated autonomous underwater vehicle (AUV) that surveys a patch of seabed on its own, finds suspicious objects, and *imagines what it would see from different angles before moving* so it can decide the fastest way to confirm what each object is. It never touches anything. It hands a prioritised **"master target list"** to human disposal teams. Its brain has three layers:
-
-1. **Mission planner (Gemini 4 Argon)** — plans the survey, decides which contacts need a closer look, and writes the final target list with reasons.
-2. **Imagination (NVIDIA Cosmos world model)** — predicts what the sonar and camera *would* show from each candidate viewpoint, so the planner can pick the most informative one instead of circling blindly. In Tier 2 we fine-tune it on our own synthetic sonar so it genuinely understands sonar shadows.
-3. **Perception + control (small NVIDIA-stack models)** — a sonar object detector trained on real Hugging Face sonar data plus synthetic sonar, and a depth/heading controller that flies the vehicle.
-
-All of it runs in **NVIDIA Isaac Sim** via **OceanSim**, an open-source underwater extension with physics-based camera and imaging-sonar rendering.
-
-**The steps.**
-1. Get an AUV flying a survey pattern over a procedurally generated North Sea seabed, with sonar and camera output, on Modal L40S GPUs.
-2. Scatter objects: mines, aerial bombs, rocks, tyres, pipe sections, debris. Some half-buried.
-3. Train a sonar detector on real + synthetic sonar.
-4. Wire up the loop: survey → detect contact → imagine viewpoints → pick → inspect → classify → log.
-5. (Tier 2) Generate thousands of synthetic survey passes and fine-tune the world model on them. Show before/after.
-6. (Tier 3) Multiple AUVs, murky-water and silt-plume handling, buried-object magnetometer cue.
-7. Cut a 60-second video.
-
-**The outcome.** A 60-second video of an AUV autonomously surveying a wind-farm site in murky water, reasoning out loud about each contact, choosing inspection angles by imagining them first, and producing a target list for the humans. Plus an open synthetic sonar dataset and sim environment on Hugging Face.
-
-**One line:** *"Survey the seabed before anyone has to dive."*
-
----
-
-## Assumptions and open questions
-
-Answer these before kickoff if you can; the plan picks defaults otherwise.
-
-| # | Question | Default assumed |
+| Original | Now | Why |
 |---|---|---|
-| 1 | Budget is **$500 of Modal credit on one shared workspace**. Does its plan have seats for all 5? (Starter lists up to 3) | Check at T+0. If short, upgrade the plan or have the extra people run jobs through a teammate who has access |
-| 2 | Max concurrent L40S on the workspace? | Modal lists **10** on Starter; plan assumes **4** and scales to 8–10 if GPUs are available |
-| 3 | Does anyone have an Isaac Sim / Omniverse account already? (needed for some asset downloads) | One person creates it at T+0 |
-| 4 | Gemini 4 Argon API key confirmed working? | Yes; `gemini-3.8-flash` fallback |
-| 5 | Is Cosmos 3 gated access already granted on someone's HF account? | Request at T+0; fallback Cosmos Predict2-2B (ungated) |
-| 6 | Do we want one AUV or a swarm in the video? | One AUV baseline; swarm is Tier 3 |
+| Full OceanSim environment with 5 scenarios | **Minimal OceanSim scene: generated seabed, simple objects, sonar + camera** | Keeps the real sensor simulation, drops most of the setup |
+| AUV with hydrodynamics and PID control | **Sensors follow a scripted path** | Nothing to tune, and it looks the same on video |
+| Closed loop in Isaac | **Separate Modal jobs that pass files between steps** | Each person can work and test alone |
+| Live Cosmos server, LoRA on thousands of episodes | **Imagination rendered in OceanSim**; Cosmos only as a stretch | Cuts the riskiest training and a live service |
+| YOLOv8s on real + large synthetic set | **YOLOv8n, two short runs** | Training fits in about an hour |
+
+**Removed:** LeRobot, EnvHub, ACT, LoRA, MarineGym, ROS2, TensorRT, swarm, silt plume, magnetometer.
+
+**Python sonar sim:** fallback only. Nobody builds it unless the 20:00 gate in §3 fails.
 
 ---
 
-## 0. The pitch (narration skeleton)
+## 2. Architecture
 
-> The seabed around Britain hides hundreds of thousands of tonnes of unexploded wartime bombs, right where we're building the wind farms that will power the country. Every site must be surveyed first, and the hard part isn't finding objects, it's telling a bomb from a rock. Our robot surveys on its own, and before it moves it imagines what each viewpoint would reveal, so it inspects smarter, not longer. Look before you dive.
+```
+ modal: sim/survey.py     scripted lawnmower through the OceanSim scene
+        │                 → sonar/*.png, cam/*.png, poses.csv, world.json, labels/
+        ▼
+ perception/detect.py     YOLOv8n on the sonar frames → contacts.json
+        ▼
+ modal: sim/visit.py      for each contact:
+        │                 1. imagine: in a clean scene, render "bomb" vs "rock"
+        │                    from 3–4 angles and pick the angle where they differ most
+        │                 2. inspect: render the real scene from that angle
+        │                 → viewpoints.json, imagined/*.png, inspections/*.png
+        ▼
+ agent/planner.py         Gemini reads the crops, writes verdicts → targets.json
+        ▼
+ viz/compose.py           sonar | camera | map | imagined views | verdict → demo.mp4
+```
+
+Each step reads and writes files in `runs/<id>/`. Only the two sim jobs and training need a GPU, so everything else runs on a laptop against `runs/sample/`.
+
+**Why this counts as imagination:** before moving, the robot predicts what each hypothesis would look like from each angle, then goes where the answer would be clearest. The imagine step must use only the detected position and size, never `world.json`. Ground truth is for labels and scoring.
 
 ---
 
-## 1. Architecture
+## 3. Proving OceanSim on Modal (top priority)
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│ MISSION PLANNER — Gemini 4 Argon                                   │
-│ in: survey map, detector contacts, imagined views                  │
-│ out: survey pattern, revisit queue, viewpoint choice, target list  │
-└───────────────┬────────────────────────────────────────────────────┘
-                │ candidate viewpoints for a contact
-┌───────────────▼────────────────────────────────────────────────────┐
-│ WORLD MODEL — Cosmos 3 Edge (4B)  [Tier 2: LoRA on synthetic sonar]│
-│ in: current sonar/camera frame + candidate trajectory              │
-│ out: imagined sonar strip / camera clip from that viewpoint        │
-└───────────────┬────────────────────────────────────────────────────┘
-                │ chosen viewpoint
-┌───────────────▼────────────────────────────────────────────────────┐
-│ PERCEPTION — YOLO sonar detector (real HF data + synthetic)        │
-│ CONTROL — depth/heading/waypoint PID + station-keeping             │
-└───────────────┬────────────────────────────────────────────────────┘
-                │ thruster commands
-┌───────────────▼────────────────────────────────────────────────────┐
-│ SIMULATOR — OceanSim on Isaac Sim 5.0                              │
-│ procedural seabed, scattered UXO + decoys, imaging sonar, camera,  │
-│ turbidity/fog, (Tier 3) silt plume, fake magnetometer              │
-└────────────────────────────────────────────────────────────────────┘
-```
+**Known facts:** the `nvcr.io/nvidia/isaac-sim:5.0.0` image exists, and OceanSim targets Isaac Sim 5.0. OceanSim has headless camera scripts, but no headless sonar script, so we write that.
 
-### Components and sources
+**Main unknown: rendering on Modal.** The sonar is built on an RTX camera, so it needs Vulkan. Modal runs containers on gVisor, which supports Vulkan only if the graphics capability is exposed, and we found no confirmation that Modal does this. Also, a forum report shows camera scripts crashing on a headless L40S with a too-new driver. Test this first.
 
-| Component | What | Source / notes |
+| By | Step | Pass when |
 |---|---|---|
-| Simulator | **OceanSim** — public repo, Isaac Sim 5.0 GA compatible; physics-based underwater camera + GPU imaging sonar; terrain-generation example; standalone synthetic-data-generation scripts; ROS2 example | github.com/umfieldrobotics/OceanSim |
-| Vehicle dynamics fallback | **MarineGym** (Isaac Sim hydrodynamics plugin, 5 UUV models) if its code is available; otherwise a hand-written buoyancy + quadratic drag model (≈50 lines) | github / arXiv 2503.09203 |
-| World model | **Cosmos 3 Edge** (4B, fits one L40S for inference and LoRA) | huggingface.co/collections/nvidia/cosmos3 |
-| Planner | **Gemini 4 Argon** (`gemini-4-argon`), structured JSON output; fallback `gemini-3.8-flash` | Gemini API |
-| Sonar detector | Ultralytics YOLOv8s/v11s trained on **`rehan9599/drishti-sss`** (HF, YOLO-format side-scan tiles incl. mine-like contacts, wrecks, hard negatives, CC-BY-SA-4.0) + our synthetic OceanSim sonar | Hugging Face |
-| Extra real sonar | MILCO/NOMBO mine dataset (figshare, 1,170 images); AI4Shipwrecks (286 images); UATD forward-looking sonar (9k images) | figshare / GitHub |
-| Data format / glue | **LeRobot** dataset format + EnvHub wrapper for the OceanSim env | github.com/huggingface/lerobot |
-| Compute | Modal, **L40S only** (48 GB), ≈ $1.95/hr | modal.com |
+| **17:30** | **1. GPU + Vulkan:** L40S container from the 5.0.0 image | `nvidia-smi` and `vulkaninfo --summary` both see the L40S. Record the driver version |
+| **18:15** | **2. Isaac renders:** headless script with a cube and camera | A PNG with the cube visible |
+| **19:15** | **3. OceanSim sonar:** extension in `/isaac-sim/extsUser`, `ImagingSonarSensor` aimed at a sphere | A sonar PNG with the sphere visible, plus an underwater camera PNG |
+| **20:00** | **4. Survey pass (GATE A):** path over seabed with 4 objects | MP4 of sonar + camera with objects visible and labels saved |
+
+**Try these before calling it failed:**
+- Add `/etc/vulkan/icd.d/nvidia_icd.json` to the image, and unset `CUDA_VISIBLE_DEVICES`
+- Try the `5.1.0` image, then another RTX-capable Modal GPU type
+- Ask Modal support or their community about Vulkan, starting at step 1 if it fails
+
+**Decision at 20:00:** if step 4 hasn't passed, write down what failed and what was tried. Then move to the Python sonar sim (§9), which takes about 1.5 hours and keeps everything downstream the same. If you have a decisive lead at 20:00, you can extend once to 20:30, which means dropping the hero-shot polish.
+
+**Setup notes:**
+- Run the image with `modal.Image.from_registry(..., add_python=...)` and start Isaac as a subprocess through `/isaac-sim/python.sh`. Set `ACCEPT_EULA=Y` and `PRIVACY_CONSENT=Y`
+- Keep the shader cache on a Volume so only the first start is slow
+- Use `modal shell` for debugging, but stop it when done, because it holds a GPU
+- **Don't use OceanSim's Google Drive assets:** use generated terrain and simple primitives with semantic labels. Start with the sonar at `max_range` about 10 m, `hori_res` about 1000, and altitude 2–3 m, then tune
 
 ---
 
-## 2. Interface contracts (agree in the first 30 min)
+## 4. Components
 
-```python
-# Observation (sim → everyone)
-obs = {
-  "sonar": np.uint8[512, 512],          # imaging-sonar frame (polar→cartesian), 1 channel
-  "sss_strip": np.uint8[256, W],        # side-scan waterfall accumulated over last N s (optional)
-  "cam": np.uint8[360, 640, 3],         # forward camera, turbidity applied
-  "pose": np.float32[7],                # x,y,z (depth), quat
-  "vel": np.float32[6],
-  "altitude": float,                    # height above seabed (DVL-style)
-  "mag": float,                         # Tier 3: fake magnetometer anomaly (nT)
-  "t": float,
-}
-
-# Action (controller → sim)
-action = np.float32[4]                  # surge, sway, heave, yaw-rate (normalised -1..1)
-
-# Contact (detector → planner)
-contact = {"id": str, "xy": [x, y], "cls": str, "conf": float, "snippet": base64_png}
-
-# Viewpoint candidate (planner → world model → planner)
-viewpoint = {"id": str, "label": str, "waypoints": [[x,y,z], ...], "rationale": str}
-
-# Imagination request (anyone → world-model server)
-POST /imagine {frame: b64, modality: "sonar"|"cam", actions: [[s,sw,h,yr], ...] | None, prompt: str, n_frames: 16}
-→ {clip: b64_mp4, frames: [b64_png, ...]}
-
-# Planner verdict (planner → log/overlay)
-verdict = {"contact_id": str, "class": "UXO"|"non-UXO"|"uncertain", "confidence": 0-1,
-           "reason": str, "standoff_m": float, "priority": int}
-
-# LeRobotDataset episode features
-observation.images.sonar, observation.images.cam, observation.state, action, task, scenario_id, labels (per-object gt)
-```
-
----
-
-## 3. Budget model ($500, L40S only, ≈$1.95/hr → ~256 GPU-hours total)
-
-Everything runs on L40S. No H100 means: keep the world model at **Edge 4B**, LoRA not full fine-tune, 8–16-frame windows, 256–360p. Parallelism comes from several L40S running *independent* jobs, never one job split across GPUs.
-
-| Bucket | GPU-hours | Cost | Notes |
-|---|---|---|---|
-| Sim bring-up & scenario dev (1 GPU, intermittent) | 14 | $27 | Scale-to-zero between runs |
-| World-model inference server (intermittent) | 10 | $20 | `container_idle_timeout=90s` |
-| Sonar detector training (YOLO, 2 runs) | 2 | $4 | Tiny |
-| **Tier 2** synthetic data generation (4 GPUs × 1.5h) | 6 | $12 | 3–6k episodes |
-| **Tier 2** Cosmos LoRA fine-tune (2 configs in parallel × 5h) | 10 | $20 | |
-| **Tier 2/3** LeRobot ACT controller training | 2 | $4 | Optional |
-| Parallel evaluation/recording passes (4 GPUs × 2h × 2 passes) | 16 | $31 | Baseline pass + fine-tuned pass |
-| **Tier 3** extras (swarm, plume, re-records) | 12 | $23 | Only if ahead of schedule |
-| Shader-cache image build, mistakes, OOMs | — | $25 | Buffer |
-| CPU, storage, egress | — | $8 | |
-| **Total** | **~72 GPU-h** | **≈$174** | Leaves ~$326 headroom |
-
-**Time is now the limit, not credit.** Spend the headroom to save hours: fan out data gen and recording to 8–10 L40S if available, run a third LoRA config, and record more seeds. The tier order and gates don't change.
-
-Rules:
-- Set a workspace budget of **$450** so a runaway job can't use all the credit.
-- Bake Isaac Sim's shader cache into the Modal image (or a Volume) before fanning out, or every container burns 3–5 min of GPU at startup.
-- Every Modal function has `container_idle_timeout ≤ 120` and `timeout` set. No GPU sits idle.
-- One person owns the Modal dashboard and checks spend at every gate.
-
----
-
-## 4. Tier 0 → Tier 3: what each adds
-
-| | **Tier 0 — Baseline** | **Tier 1 — Imagination** | **Tier 2 — Taught world model** | **Tier 3 — Stretch** |
-|---|---|---|---|---|
-| Sim | OceanSim seabed, 1 AUV, sonar + cam, 6 object types, turbidity | + 5 scenarios (clear, murky, sand ripples, half-buried, debris field) | + mass synthetic data gen | + silt plume, multi-AUV, fake magnetometer |
-| Perception | YOLO on real HF sonar + synthetic | same | retrained with 10× more synthetic | + buried-object cue from magnetometer |
-| World model | none (planner picks viewpoints by rules) | Cosmos 3 Edge **zero-shot**, camera-view imagination only | **LoRA on our sonar+cam data**; action-conditioned sonar imagination | fine-tuned on plume data too |
-| Planner | Gemini: lawnmower survey + revisit queue + target list | + scores imagined views, picks viewpoint | same, now with meaningful sonar imagination | + task allocation across AUVs |
-| Control | PID depth/heading/waypoint | same | optional LeRobot ACT for close inspection | same |
-| Hero shot | AUV surveys, finds and classifies contacts, outputs list | 2×2 imagined viewpoints → pick → inspect | **before/after**: zero-shot vs fine-tuned imagination vs truth | 3 AUVs splitting a site; plume avoided |
-| Est. cost | ~$55 | ~$80 | ~$150 | ~$200+ |
-
-**Build in order. Each tier is a complete, submittable demo.** Do not start a tier until the previous one has recorded footage in `/data/best/`.
-
----
-
-## 5. Timeline (T = kickoff). Feature freeze T+20:00, edit freeze T+23:00.
-
-### Phase 0 — T+0:00 → T+0:30 — Kickoff
-- Confirm answers to the open questions. Check Modal L40S concurrency.
-- Repo (layout §7), invite the team to the Modal workspace, Volume `/data`, HF org + dataset repo.
-- Request Cosmos 3 gated access on HF (one account). Create Omniverse/NVIDIA developer account for Isaac Sim assets.
-- Agree §2 interfaces. Video workstream starts script v1 from §6.
-
-### Phase 1 — T+0:30 → T+4:00 — AUV in the water (CRITICAL PATH)
-**Sim workstream (2 people on this):**
-- Modal image: Isaac Sim 5.0 container + OceanSim installed per `docs/subsections/installation.md`. Accept EULAs via env vars. Run once during build to populate shader cache; persist cache dir to a Volume.
-- Run OceanSim's terrain-generation example and SDG scripts headless (`--no-window` / `headless=True`). Confirm: (a) imaging-sonar frame as numpy, (b) camera frame with turbidity, (c) vehicle moves on thruster commands, (d) reset with seed → new seabed.
-- Vehicle: use OceanSim's demo vehicle if present; otherwise a BlueROV2-like rigid body with buoyancy + drag. Write `sim/auv_env.py` (reset/step/render) and `sim/controller.py` (PID depth/heading/waypoint).
-- `sim/objects.py`: spawn library — cylinder mine, aerial bomb (cylinder + fins), sphere mine, rock (random mesh), tyre (torus), pipe section, crate/debris. Random partial burial (sink z by 0–60% of height). Record ground-truth class + pose per object.
-
-**World-model workstream:**
-- `models/world_model_server.py` on L40S serving Cosmos 3 Edge; `/imagine` with text prompt + frame. Test on a real underwater photo and a real sonar tile from `drishti-sss`. Note how bad sonar imagination is zero-shot (this is the "before" footage, save it).
-
-**Perception workstream:**
-- `snapshot_download("rehan9599/drishti-sss")`; train YOLOv8s on L40S (~40 min). Save weights to Volume. Measure mAP on its test split.
-
-**Planner workstream:**
-- Gemini 4 Argon key; JSON-schema prompt that takes a survey map + contact list and returns a revisit queue and viewpoint candidates. Test on fake inputs. Measure latency.
-
-**Data & visuals workstream:**
-- `data/lerobot_writer.py` (dummy test), `viz/compose.py` (sonar waterfall | camera | map | imagined 2×2 layout), `viz/overlays.py` (planner text, standoff circles).
-
-**GATE 1 (T+4:00):** AUV flies a lawnmower pattern headless on Modal; we have an MP4 with sonar + camera showing a scattered object. **Hard deadline T+5:30 → Fallback F1.**
-
-### Phase 2 — T+4:00 → T+8:00 — Tier 0 complete
-- Sim: 5 scenarios as config overrides — `clear_sand`, `murky` (high turbidity), `ripples` (rippled seabed texture confuses sonar), `half_buried`, `debris_field` (many decoys).
-- Perception: fine-tune YOLO on real + ~500 synthetic OceanSim sonar tiles; export to TensorRT if easy (NVIDIA points).
-- Planner + control: `agent/mission_loop.py` Tier 0 — survey → detector contacts → rule-based revisit (fly a circle at standoff) → classify from multiple views → Gemini writes target list with reasons.
-- Data & visuals: recording hooks (sonar, cam, chase-cam, map, planner JSON) → `/data/runs/<id>/`; start `video/shots.md`.
-
-**GATE 2 (T+8:00):** Full Tier 0 loop produces a target list on `clear_sand`. Record it. *You now have a submittable video.*
-
-### Phase 3 — T+8:00 → T+12:00 — Tier 1 (imagination in the loop) + Tier 2 data gen starts
-- Planner: for each contact, propose 3–4 viewpoints; call `/imagine` (camera modality, zero-shot) per viewpoint; score via Gemini ("which view would best reveal a cylinder with fins?"); go. Overlay the 2×2 imagined grid + reasoning text.
-- Sim + Data: **fan out synthetic generation to 4 L40S** (~1.5h): scripted survey passes over randomised seabeds, all 5 scenarios, 20–40 s episodes, sonar + cam + actions + object labels → LeRobotDataset shards → merge → push to HF as `<org>/northsea-uxo-survey-v1`. Target 3–6k episodes. Include "bad approach" episodes (wrong angle, too high, so shadows are ambiguous) — the world model must learn why angle matters.
-- World model: write `models/convert_to_cosmos.py` (LeRobot → Cosmos forward-dynamics format; sonar as single-channel repeated to RGB).
-
-**GATE 3 (T+12:00):** Tier 1 footage recorded on 2+ scenarios. ≥2k episodes on the Volume.
-
-### Phase 4 — T+12:00 → T+18:00 — Tier 2 (fine-tune) while polishing
-- World model: launch **2 LoRA configs on 2 L40S** (Cosmos 3 Edge; rank 16; bf16; 8–16-frame windows; 256p sonar, 360p cam; lr 1e-4 vs 3e-5). Checkpoint every 30 min; eval on 20 held-out episodes: imagined vs real sonar strip, frame error. **First checkpoint clearly better than zero-shot is enough.** Swap the best LoRA into the server.
-- Planner: switch to action-conditioned imagination (controller pre-computes the trajectory for each viewpoint → world model rolls it out). Keep text-prompt mode behind a flag.
-- Perception: retrain YOLO with the full synthetic set; report mAP before/after on the real test split (a real number for the video).
-- Optional: LeRobot ACT policy for the close-inspection orbit, trained on scripted passes (1 L40S, 2h). Use only if it beats PID visually.
-- Data & visuals: before/after 3-panel renderer (zero-shot | fine-tuned | ground truth), same start frame, same actions.
-
-**GATE 4 (T+18:00):** Fine-tuned LoRA in the loop; before/after clip recorded on `half_buried` and `ripples`.
-
-### Phase 5 — T+18:00 → T+20:00 — Recording pass + Tier 3 if ahead
-- **4 L40S in parallel**: 5 scenarios × 5 seeds, Tier 2 loop. Record everything. Compute: contacts found / total, classification accuracy UXO vs non-UXO, avg inspections per contact (Tier 0 rules vs Tier 2 imagination — fewer is the win), survey time.
-- Tier 3 only if Gate 4 passed early:
-  - **Silt plume**: particle effect triggered when altitude < 1 m and thrust high; world model (or a heuristic) predicts it; planner picks up-current approach. 10-second clip.
-  - **Multi-AUV**: 3 vehicles, Gemini allocates survey lanes and revisits. 10-second overhead shot.
-  - **Magnetometer**: dipole anomaly for ferrous objects; lets the planner flag fully buried items the sonar can't see. One clip.
-
-**Feature freeze T+20:00.**
-
-### Phase 6 — T+20:00 → T+24:00 — Edit & submit
-- Edit from `shots.md`. Voice-over, title cards, numbers card. Export 1080p/60s. Submit by T+23:30. Push README + HF dataset card.
-
----
-
-## 6. The video — storyboard
-
-| Time | Shot | Source |
+| Part | Choice | Notes |
 |---|---|---|
-| 0–7s | Dark water. Text: "1.3 million tonnes of wartime munitions lie under the North Sea." Cut to a wind-farm map. "We build wind farms on top of them." | title cards + map |
-| 7–15s | AUV drops in, lawnmower survey begins; sonar waterfall builds on the side; murky camera view | `clear_sand` → `murky` runs |
-| 15–30s | **Hero**: a contact appears. 2×2 imagined views from four angles fade in. Planner text: "North approach at 2 m: shadow would show fins → choose." AUV flies it; sonar reveals a finned cylinder; "UXO — aerial bomb, 0.91" with a red standoff circle | Tier 1/2 loop, `half_buried` |
-| 30–40s | **Before/after**: zero-shot imagination (mush) vs fine-tuned (correct shadow) vs truth | 3-panel renderer |
-| 40–50s | Fast cuts: tyre → "non-UXO", rock → "non-UXO", debris field, (Tier 3: plume avoided / 3 AUVs) | scenario runs |
-| 50–56s | Numbers card: episodes generated, detector mAP before→after, inspections per contact before→after, classification accuracy | metrics |
-| 56–60s | Master target list on the site map handed to "EOD team". "Look before you dive." Logos: Isaac Sim · Cosmos · LeRobot · Gemini · Modal. HF link | title card |
+| Sim | OceanSim on Isaac Sim 5.0, Modal L40S | Forward-looking imaging sonar + underwater camera |
+| Scene | Generated seabed; bomb (cylinder + fins), sphere mine, rock, tyre; some part-buried | Primitives keep it simple |
+| Scenarios | `clear_sand`, `half_buried`, `murky` | `murky` changes the camera only |
+| Detector | YOLOv8n, 2 classes: `mine_like`, `other` | Trained on Modal L40S |
+| Real sonar data | `rehan9599/drishti-sss`: 5,205 YOLO images, about 2 GB, CC-BY-SA-4.0 | Map `mine_cylinder` → `mine_like`; `shipwreck`, `submarine_pipeline`, `ghost_net` → `other` |
+| Synthetic data | About 500–1,000 OceanSim frames, labelled from sim semantics | From the survey job |
+| Planner | Gemini, structured JSON output | Confirm the model name and key in the first hour. Fall back to a template if the API fails |
+| Chase shots | Extra Isaac camera in the survey job | Simple AUV prim. Optional |
+| World model (stretch) | Cosmos3-Edge (4B), zero-shot, pre-rendered for the hero contact | Only if Gate C is early. Labelled as a concept |
 
-Shot rules: every run saves sonar, camera, chase-cam, map, imagined clips, planner JSON. Record 3× more than needed. The safety line ("it never touches anything; humans dispose") appears on screen once.
+**Training:**
+1. **Run 1:** `drishti-sss`, about 30 epochs. Record mAP on its test split. This doesn't depend on the sim, so it starts right away.
+2. **Run 2:** continue on OceanSim frames + real data, about 20 epochs. Record mAP on held-out seeds.
+
+`drishti-sss` is side-scan sonar and OceanSim is forward-looking, so run 1 won't transfer well. **Run 2 is the one the demo needs.** Report the two scores separately. Expect 1–2 GPU-hours total.
+
+**Budget:** $500 Modal credit, with a $450 limit. Expect to spend **under $60**.
 
 ---
 
-## 7. Repo layout
+## 5. Team
+
+| Person | Owns | First deliverable |
+|---|---|---|
+| **Shashank:** training + Modal | `perception/`, Modal account and spend, Cosmos stretch | YOLO run 1 by 18:30 |
+| **P2:** OceanSim on Modal | `modal/`, steps 1–3 in §3, `sim/survey.py` job | Step 1 by 17:30 |
+| **P3:** scene + data | `sim/scene.py`, scenarios, labelled frames | Step 4 with P2 by 20:00 |
+| **P4:** planner + integration | `agent/planner.py`, `run_demo.py`, `viz/metrics.py`, smoke test, merges, calling cuts | Pipeline on stubs by 18:00 |
+| **P5:** imagination + demo output | `agent/imagine.py`, `sim/visit.py`, `viz/compose.py` | Angle scoring and `compose.py` on sample files by 19:00 |
+
+The video is not anyone's job until the end: the team records it together from the pipeline output after feature freeze.
+
+**Handoffs (estimates):**
+- **P2 → P3, P5:** working Isaac + OceanSim image by about 19:15. P3 and P5 write code against the planned interface until then.
+- **P3 → Shashank:** labelled frames by about 21:00, so run 2 finishes before Gate B.
+- **P3 → P5:** `sim/scene.py` usable for clean and real scenes by Gate A.
+- **Shashank → P4:** run 1 weights by 18:30, run 2 weights by about 22:00.
+- **P4 → P5:** a real `runs/<id>/` folder by Gate B. Until then, use `runs/sample/`.
+
+**Between training runs,** Shashank helps P2 debug Modal. If OceanSim fails at 20:00, P2, P3 and P5 build the Python sim together.
+
+**Modal seats:** Shashank, P2, P3 and P5 all run GPU jobs. If Starter limits seats to 3, upgrade, or have P5 run `sim/visit.py` through P3.
+
+---
+
+## 6. Schedule (Saturday 7 Nov → Sunday 8 Nov, GMT)
+
+| Time | Goal |
+|---|---|
+| **16:45–17:15** | Kickoff: repo skeleton, `CLAUDE.md`, file formats (§7), stubs and `runs/sample/`. Accounts and keys |
+| **17:15–20:00** | P2 + P3 prove OceanSim (§3). Shashank trains run 1. P4 connects stubs. P5 builds angle scoring and compose on samples |
+| **GATE A, 20:00** | **OceanSim survey video, or the documented decision to fall back** |
+| **20:00–22:30** | P3 generates frames → Shashank trains run 2 → P4 connects real pieces and Gemini. P5 gets `sim/visit.py` running in OceanSim |
+| **GATE B, 22:30** | **Baseline: target list and `demo.mp4`, inspecting from a fixed angle. Save it. This is submittable** |
+| **22:30–00:00** | P5 adds imagination to the loop, with P3's help. P2 adds chase shots. P4 runs metrics |
+| **GATE C, 00:00** | Hero contact shows imagined views → chosen angle → verdict |
+| **00:00–00:45** | Record 3 scenarios × 3–5 seeds and choose the best footage |
+| **00:45** | **Feature freeze** |
+| **00:45–01:45** | Team records the video from pipeline output (simple edit only), P4 finishes the README, final checks. **Submit by 01:45** |
+
+**Cut in this order when behind:** Cosmos → chase shots → scenarios beyond `clear_sand` → imagination on all contacts (keep the hero contact) → Gemini (use a template) → YOLO run 2 quality. Never cut Gate B.
+
+---
+
+## 7. File formats (agree at kickoff)
+
+```jsonc
+// world.json: ground truth, used only by labels, metrics and render
+{"seed": 3, "scenario": "half_buried",
+ "objects": [{"id": "o1", "cls": "aerial_bomb", "xyz": [42.0, 118.5, -0.2], "yaw": 0.7, "burial": 0.3}]}
+
+// contacts.json
+[{"id": "c1", "xy": [41.8, 118.9], "size_m": [1.8, 0.5], "cls": "mine_like", "conf": 0.81,
+  "frame": "sonar/000412.png", "crop": "crops/c1.png"}]
+
+// viewpoints.json
+[{"contact_id": "c1", "chosen": "north", "scores": {"north": 0.72, "east": 0.31, "south": 0.68, "west": 0.29},
+  "imagined": {"north": ["imagined/c1_north_bomb.png", "imagined/c1_north_rock.png"]},
+  "inspection": "inspections/c1_north.png"}]
+
+// targets.json
+[{"contact_id": "c1", "class": "UXO", "confidence": 0.86, "priority": 1, "standoff_m": 50,
+  "reason": "Long, narrow return with a fin-like tail from the north view"}]
+```
+`poses.csv` columns: `t,x,y,depth,yaw,frame`. `class` is `UXO`, `non-UXO` or `uncertain`. `standoff_m` is illustrative.
+
+---
+
+## 8. Repo and the video
 
 ```
-northsea-uxo-auv/
-├── README.md
-├── modal/
-│   ├── image_oceansim.py       # Isaac Sim 5.0 + OceanSim, shader cache volume
-│   ├── image_models.py         # Cosmos 3 + YOLO + Gemini client
-│   └── volumes.py
-├── sim/
-│   ├── auv_env.py              # reset/step/render around OceanSim
-│   ├── controller.py           # PID depth/heading/waypoint, station-keep
-│   ├── objects.py              # UXO + decoy spawn library, burial, GT labels
-│   ├── scenarios.py            # clear_sand, murky, ripples, half_buried, debris_field
-│   ├── sonar_utils.py          # polar→cartesian, waterfall accumulation
-│   ├── scripted_survey.py      # lawnmower + inspection orbits → episodes
-│   └── generate_data.py        # Modal fan-out
-├── envhub/env.py               # LeRobot EnvHub make_env()
-├── perception/
-│   ├── train_yolo.py           # drishti-sss + synthetic
-│   └── detector.py
-├── models/
-│   ├── world_model_server.py   # /imagine
-│   ├── convert_to_cosmos.py
-│   ├── finetune_lora.py
-│   └── planner.py              # Gemini 4 Argon → JSON
-├── agent/mission_loop.py
-├── data/{lerobot_writer.py, push_to_hub.py}
-├── viz/{compose.py, overlays.py, compare.py, metrics.py}
-└── video/{script.md, shots.md, title_cards/}
+├── CLAUDE.md          # rules for every Claude session
+├── run_demo.py        # runs every step, Modal jobs included
+├── modal/{image.py, sim_jobs.py, train_jobs.py}
+├── sim/{scene.py, survey.py, visit.py}
+├── perception/{train.py, detect.py}
+├── agent/{imagine.py, planner.py}
+├── viz/{compose.py, metrics.py}   # compose = demo output view
+├── tests/test_smoke.py  # runs run_demo.py on stubs
+├── runs/sample/         # example of every file, committed
+└── video/{script.md, shots.md}
 ```
 
----
+**Working rules:** one owner per folder; small commits; pull before push; P4 runs the smoke test after every merge. Check outputs by eye at every gate.
 
-## 8. Risks, gates, fallbacks
+| Time | Shot |
+|---|---|
+| 0–7 s | The problem: wartime munitions under the North Sea, wind farms being built on top |
+| 7–17 s | Survey begins, sonar and murky camera side by side, contacts appear |
+| 17–37 s | **Hero:** a contact appears → imagined "bomb vs rock" from 4 angles → picks the clearest → inspects → verdict with reason |
+| 37–47 s | Fast cuts: tyre and rock cleared, part-buried bomb flagged |
+| 47–54 s | Numbers: detector mAP, contacts found, classification accuracy, all from real runs |
+| 54–60 s | Target list on the site map, handed to the disposal team. "Look before you dive." |
 
-| # | Risk | Likelihood | Detect | Fallback |
-|---|---|---|---|---|
-| F1 | OceanSim won't run headless on Modal (Isaac 5.0 install, Vulkan, EULA, missing demo vehicle) | Medium | Gate 1, hard stop T+5:30 | Plain Isaac Sim + Replicator: fog volume for turbidity, ray-cast "sonar" (depth + incidence-angle shading + speckle noise), hand-rolled buoyancy. Lower fidelity, same story. Last resort: HoloOcean (Unreal) — not NVIDIA, avoid unless desperate |
-| F2 | Cosmos 3 gated access not granted in time | Medium | T+2:00 | Cosmos Predict2-2B (ungated); fine-tune the same way |
-| F3 | Zero-shot sonar imagination is garbage | Near-certain | T+3:00 | That's the "before" footage. Tier 1 uses camera-modality imagination; Tier 2 fixes sonar |
-| F4 | LoRA OOM / diverges on L40S | Medium | first 30 min | rank 8, 8-frame windows, 256p, batch 1 + grad accumulation; any checkpoint beating zero-shot is enough |
-| F5 | Gemini latency too high for the loop | Medium | T+1:00 | Flash for proposals, Argon for final verdicts; cache per scenario |
-| F6 | Shader compile on every container | High | first fan-out | Bake into image/Volume before Phase 3 |
-| F7 | Sonar from sim looks nothing like real sonar → detector doesn't transfer | Medium | Phase 2 | Train detector mostly on real HF data; use synthetic only to add decoy classes. Add speckle/blur augmentation |
-| F8 | Only 1–2 L40S allowed concurrently | Medium | T+0:30 | Data gen takes 3–6h on 1 GPU instead; start it at T+8 and run through the night; skip second LoRA config |
-| F9 | Running out of credit | Low with this budget | every gate | Tier 3 is the first thing cut; then second LoRA config; then recording pass count |
+**Keep the claims honest:** say "simulated" on screen and report only measured numbers. Confirm the source of the 1.3 million tonnes figure before recording.
 
 ---
 
-## 9. First-hour checklist
+## 9. Risks and fallbacks
 
-- [ ] Open questions answered; L40S concurrency known
-- [ ] Team invited to the Modal workspace; $450 budget set; Volume and idle-timeouts policy agreed
-- [ ] HF org + `northsea-uxo-survey-v1` repo; Cosmos 3 access requested
-- [ ] NVIDIA developer / Omniverse account for Isaac assets
-- [ ] Repo created; §2 interfaces pasted into README
-- [ ] Sim: OceanSim repo cloned, installation.md read, Modal image building
-- [ ] World model: Cosmos 3 Edge downloading to Volume
-- [ ] Perception: `drishti-sss` downloaded; YOLO training launched
-- [ ] Planner: Gemini key working; JSON schema test on a sonar tile
-- [ ] Data & visuals: LeRobot dummy write; compose.py on placeholders
-- [ ] Video: script v1; music shortlisted; `shots.md` created
+| Risk | Fallback |
+|---|---|
+| **OceanSim can't render on Modal by 20:00** | **Python sonar sim:** NumPy heightfield + shadow casting + speckle, writing the same files. P2, P3 and P5 build it in about 1.5 h; `sim/visit.py` uses it too. Gate B holds at 22:30 and the top-down map replaces camera shots |
+| Sonar import fails headless (`omni.ui` import, viewport code) | Avoid `make_sonar_viewport`; patch or stub only the UI parts |
+| Slow cold starts | Shader cache on a Volume; batch work into one job per scenario |
+| Sonar is too slow at default settings | Lower `hori_res`, use fewer frames, and hold still at each path point |
+| Detector weak on OceanSim frames | More OceanSim frames in run 2; for the demo, train only on them and report real-data scores separately |
+| Imagined views don't differ by angle | Make shapes less symmetric; otherwise use fixed-angle footage and show imagination for the hero contact only |
+| Gemini slow or failing | Cache by contact; use template verdicts |
+| Cosmos gated, won't fit or looks bad | Drop it. It isn't part of any gate |
+| Broken main | One owner per folder; P4 restores the last passing commit |
 
 ---
 
-## 10. Why this beats the alternatives (for the README / judges)
+## 10. First-hour checklist
 
-- **Real, current, UK-relevant problem** with real industry demand, not a toy.
-- **World model used for active perception**, not just planning: "imagine the view, then go" is a genuinely different use of a WAM than arm manipulation.
-- **Sonar is a domain foundation models have never seen**, which makes the synthetic-data + fine-tune story honest and visible in the before/after.
-- **NVIDIA stack end to end** where it touches the robot: Isaac Sim, OceanSim, Cosmos, TensorRT detector. Hugging Face for data and glue.
-- **Safety by design**: detection and prioritisation only; humans dispose.
+- [ ] Names assigned to P2–P5, everyone can push
+- [ ] Modal installed, workspace shared, $450 limit set
+- [ ] L40S container from `isaac-sim:5.0.0` running; `vulkaninfo` result posted to the team
+- [ ] Hugging Face token; `drishti-sss` downloading on Modal
+- [ ] Gemini key tested with one JSON call
+- [ ] `CLAUDE.md`, stubs, `runs/sample/` and smoke test committed
+- [ ] Everyone runs `python run_demo.py` on stubs
