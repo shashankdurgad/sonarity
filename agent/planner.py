@@ -48,21 +48,42 @@ def _encode_image(path: str) -> str:
         return base64.b64encode(f.read()).decode()
 
 
+def _load_viewpoints(run_dir: str) -> dict:
+    """Load viewpoints.json and index by contact_id."""
+    vp_path = os.path.join(run_dir, "viewpoints.json")
+    if not os.path.exists(vp_path):
+        return {}
+    with open(vp_path) as f:
+        return {v["contact_id"]: v for v in json.load(f)}
+
+
 def _build_prompt(contacts: list, run_dir: str) -> tuple[str, list]:
     """Build the text prompt and list of image parts for Gemini."""
+    viewpoints = _load_viewpoints(run_dir)
     lines = ["Classify each contact:\n"]
     images = []
     for c in contacts:
         lines.append(f"Contact {c['id']}: detected class={c['cls']}, conf={c['conf']:.2f}, "
                       f"size={c['size_m']}")
+        vp = viewpoints.get(c["id"])
+
+        # Primary image: inspection from the best angle (if available)
+        if vp and "inspection" in vp:
+            insp_path = os.path.join(run_dir, vp["inspection"])
+            if os.path.exists(insp_path):
+                images.append(("image/png", _encode_image(insp_path)))
+                lines.append(f"  (inspection from {vp['chosen']} angle attached — best viewing angle)")
+
+        # Secondary image: initial sonar crop from the survey pass
         crop_path = os.path.join(run_dir, c["crop"])
         if os.path.exists(crop_path):
             images.append(("image/png", _encode_image(crop_path)))
-            lines.append(f"  (sonar crop attached)")
+            lines.append(f"  (initial sonar crop attached)")
+
     return "\n".join(lines), images
 
 
-def classify_with_gemini(contacts: list, run_dir: str, model_name: str = "gemini-2.0-flash") -> list:
+def classify_with_gemini(contacts: list, run_dir: str, model_name: str = "gemini-3.8-flash") -> list:
     """Call Gemini to classify contacts. Returns list of target dicts."""
     if genai is None:
         raise ImportError("google-generativeai not installed")
@@ -74,7 +95,7 @@ def classify_with_gemini(contacts: list, run_dir: str, model_name: str = "gemini
     client = genai.Client(api_key=api_key)
 
     prompt_text, images = _build_prompt(contacts, run_dir)
-    parts = [genai.types.Part.from_text(prompt_text)]
+    parts = [prompt_text]
     for mime, data in images:
         parts.append(genai.types.Part.from_bytes(data=base64.b64decode(data), mime_type=mime))
 
