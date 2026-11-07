@@ -67,7 +67,7 @@ Each step reads and writes files in `runs/<id>/`. Only the two sim jobs and trai
 |---|---|---|
 | ✅ Done | **1. GPU + Vulkan:** L40S container | `nvidia-smi` and `vulkaninfo --summary` both see the L40S |
 | ✅ Done | **2. Isaac renders:** headless script with a cube and camera | A PNG with the cube visible, on 6.0.1 and 6.2.0 |
-| **19:15** | **3. OceanSim sonar on 6.0.1:** extension in `/isaac-sim/extsUser`, `ImagingSonarSensor` aimed at a sphere | A sonar PNG with the sphere visible, plus an underwater camera PNG |
+| ✅ Done 18:12 | **3. OceanSim sonar on 6.0.1:** extension in `/isaac-sim/extsUser`, `ImagingSonarSensor` aimed at a sphere | A sonar PNG with the sphere visible, plus an underwater camera PNG |
 | **20:00** | **4. Survey pass (GATE A):** path over seabed with 4 objects | MP4 of sonar + camera with objects visible and labels saved |
 
 **Try these before calling it failed:**
