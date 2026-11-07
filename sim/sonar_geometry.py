@@ -24,7 +24,17 @@ class SonarParams:
     min_range: float = 0.2      # m
     max_range: float = 10.0     # m
     hori_fov: float = 130.0     # deg
+    vert_fov: float = 30.0      # deg
+    pitch: float = 25.0         # deg, sonar tilted down from horizontal
     altitude: float = 2.5       # m above seabed (sensor height used for ground-range conversion)
+
+    def ground_range_limits(self) -> tuple[float, float]:
+        """Ground distances (m) where the beam actually hits a flat seabed."""
+        lo_dep = np.radians(max(self.pitch - self.vert_fov / 2, 0.5))
+        hi_dep = np.radians(min(self.pitch + self.vert_fov / 2, 89.0))
+        near = self.altitude / np.tan(hi_dep)
+        far = min(self.altitude / np.tan(lo_dep), np.sqrt(max(self.max_range**2 - self.altitude**2, 0)))
+        return near, far
 
     @property
     def m_per_px(self) -> float:
