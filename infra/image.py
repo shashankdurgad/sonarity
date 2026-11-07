@@ -53,6 +53,9 @@ isaac_image = (
     # Modal 1.x doesn't auto-ship local modules; job files do `from image import ...`.
     .add_local_python_source("image")
     .add_local_dir(os.path.join(REPO_ROOT, "sim"), remote_path="/root/repo/sim")
+    # Mission loop imports the real detector / planner / imagination when they exist.
+    .add_local_dir(os.path.join(REPO_ROOT, "perception"), remote_path="/root/repo/perception", ignore=["weights", "*.pt", "__pycache__"])
+    .add_local_dir(os.path.join(REPO_ROOT, "agent"), remote_path="/root/repo/agent", ignore=["__pycache__"])
 )
 
 

@@ -392,17 +392,53 @@ class SimSession:
         return np.clip(out, 0, 255).astype(np.uint8)
 
     # ---------- mid-run changes ----------
+    def reserve(self, counts: dict, park_xy=(0.0, 0.0)):
+        """Pre-create hidden objects for mid-run 'reveal' events, e.g. reserve({"aerial_bomb": 2}).
+
+        Call right after load_world and BEFORE the first observe(). Objects created after rendering
+        starts never get their semantic labels registered, so OceanSim sees them as unlabelled: they
+        cast a sonar shadow but give no echo. Reserved objects are parked 3 m under the seabed (hidden
+        from sonar and camera) and are not in self.world until revealed.
+        """
+        self._reserve = getattr(self, "_reserve", {})
+        nid = max([int(o["id"][1:]) for o in self.world["objects"]] + [0]) + 1
+        for cls, n in counts.items():
+            for _ in range(n):
+                obj = {"id": f"o{nid}", "cls": cls, "xyz": [float(park_xy[0]), float(park_xy[1]), -3.0],
+                       "yaw": 0.0, "burial": 0.0}
+                nid += 1
+                self._scene_add(obj)
+                self._reserve.setdefault(cls, []).append(obj)
+        print(f"[session] reserved hidden objects: { {k: len(v) for k, v in self._reserve.items()} }", flush=True)
+
     def apply_change(self, event: dict):
         """Change the scene mid-run. Updates self.world (ground truth) to match.
 
-        {"type": "add_object", "object": {world.json object}}
+        {"type": "reveal_object", "cls": "aerial_bomb", "xy": [x, y], "yaw": 0.3, "burial": 0.2}  # needs reserve()
+        {"type": "add_object", "object": {world.json object}}   # WARNING: sonar won't echo it (see reserve)
         {"type": "remove_object", "id": "o3"}
         {"type": "set_burial", "id": "o3", "burial": 0.2}
         {"type": "set_murk", "level": 0.0..1.0}
+        Returns the affected world object (or None).
         """
         from pxr import Gf, UsdGeom
 
         kind = event["type"]
+        if kind == "reveal_object":
+            pool = getattr(self, "_reserve", {}).get(event["cls"], [])
+            if not pool:
+                raise ValueError(f"no reserved {event['cls']} left; call reserve() before the first observe()")
+            obj = pool.pop(0)
+            obj["burial"] = float(event.get("burial", 0.0))
+            obj["yaw"] = float(event.get("yaw", 0.0))
+            obj["xyz"] = [float(event["xy"][0]), float(event["xy"][1]),
+                          -obj["burial"] * CLASS_SPECS[obj["cls"]]["height"]]
+            ops = UsdGeom.Xformable(self.stage.GetPrimAtPath(self._prims[obj["id"]])).GetOrderedXformOps()
+            ops[0].Set(Gf.Vec3d(*obj["xyz"]))
+            ops[1].Set(math.degrees(obj["yaw"]))
+            self.world["objects"].append(obj)
+            print(f"[session] change applied: {event} -> {obj['id']}", flush=True)
+            return obj
         if kind == "add_object":
             obj = dict(event["object"], xyz=list(event["object"]["xyz"]))
             self.world["objects"].append(obj)

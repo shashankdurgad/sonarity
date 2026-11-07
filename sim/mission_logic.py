@@ -1,0 +1,248 @@
+"""Live mission logic (owner: P2). Pure NumPy/PIL, no Isaac, so it can be tested on a laptop.
+
+Holds the STAND-INS used until the real parts arrive (see LIVE_MISSION.md):
+  detect_frame_standin   -> replaced by perception.detect.detect_frame (P1)
+  ContactTracker         -> may be replaced by P1's tracker (same interface)
+  choose_view_standin    -> replaced by agent.imagine.imagine_contact (P5)
+  classify_standin       -> replaced by agent.planner.classify_contact (P4)
+Plus the parts P2 owns: keep-out circles, path re-planning, the mission map drawing.
+
+Decision code here only ever sees sonar images, poses and its own contacts, never world.json.
+"""
+import math
+
+import numpy as np
+
+from sim.sonar_geometry import SIZE, SonarParams, pixel_to_world
+
+STEP_M = 0.75          # path spacing (m)
+KEEP_OUT_M = 4.0       # keep-out radius around a mine-like contact (scaled to the 32 m site)
+CLEARANCE_M = 0.6      # extra margin when detouring around a circle
+INSPECT_EXTRA_M = 1.5  # inspection pose sits this far outside the keep-out circle
+DIRECTIONS = {"north": (0, 1), "east": (1, 0), "south": (0, -1), "west": (-1, 0)}
+
+
+# ---------------------------------------------------------------- detection (stand-in for P1)
+def _score_map(a: np.ndarray, p: SonarParams, block: int = 4) -> np.ndarray:
+    """Per-block brightness z-score against seabed at the same range. Masks the centre streak,
+    the fan edges and the near seabed edge (all OceanSim artefacts)."""
+    from numpy.lib.stride_tricks import sliding_window_view as sw
+
+    n = SIZE // block
+    a = a.astype(np.float32)
+    blk = a.reshape(n, block, n, block).mean(axis=(1, 3))
+    full = (a > 0).reshape(n, block, n, block).all(axis=(1, 3))
+    valid = sw(np.pad(full, 2), (5, 5)).all(axis=(2, 3))
+    yy, xx = np.mgrid[0:n, 0:n]
+    rp = np.hypot((xx + .5) * block - (SIZE - 1) / 2, (SIZE - 1) - (yy + .5) * block)
+    valid &= rp * p.m_per_px > 4.6
+    ring = rp.astype(int) // 8
+    bg = np.zeros_like(blk)
+    sd = np.ones_like(blk)
+    for k in np.unique(ring[valid]):
+        m = valid & (ring == k)
+        if m.sum() < 15:
+            valid[ring == k] = False
+            continue
+        v = blk[m]
+        med = np.median(v)
+        bg[m] = med
+        sd[m] = np.median(np.abs(v - med)) * 1.48 + 1
+    z = (blk - bg) / sd
+    z[~valid] = 0
+    c = n // 2
+    z[:, c - 4:c + 4] = 0
+    return z
+
+
+def detect_frame_standin(sonar: np.ndarray, pose: dict, p: SonarParams = SonarParams(),
+                         thr: float = 6.0, block: int = 4, max_dets: int = 3) -> list[dict]:
+    """STAND-IN detector: bright blobs vs seabed at the same range. Can't tell classes apart, so it
+    reports every blob as `mine_like` (treat unknowns as dangerous). Same output format as P1's
+    detect_frame: {xy, size_m, cls, conf, box}."""
+    z = _score_map(sonar, p, block)
+    dets = []
+    for _ in range(max_dets):
+        iy, ix = np.unravel_index(z.argmax(), z.shape)
+        peak = float(z[iy, ix])
+        if peak < thr:
+            break
+        y0, y1, x0, x1 = max(iy - 3, 0), iy + 4, max(ix - 3, 0), ix + 4
+        win = z[y0:y1, x0:x1] > thr * 0.5
+        ys, xs = np.nonzero(win)
+        by0, by1 = (y0 + ys.min()) * block, (y0 + ys.max() + 1) * block
+        bx0, bx1 = (x0 + xs.min()) * block, (x0 + xs.max() + 1) * block
+        col, row = (bx0 + bx1) / 2, (by0 + by1) / 2
+        x, y = pixel_to_world(col, row, pose, p)
+        size = max(bx1 - bx0, by1 - by0) * p.m_per_px
+        dets.append({"xy": [round(float(x), 2), round(float(y), 2)], "size_m": [round(size, 2), round(size * .6, 2)],
+                     "cls": "mine_like", "conf": round(min(peak / 15.0, 0.99), 2),
+                     "box": [int(bx0), int(by0), int(bx1), int(by1)]})
+        z[y0:y1, x0:x1] = 0
+    return dets
+
+
+class ContactTracker:
+    """Merge per-frame detections into contacts (contacts.json format). Confirmed after `min_hits`."""
+
+    def __init__(self, radius: float = 2.5, min_hits: int = 2):
+        self.radius, self.min_hits = radius, min_hits
+        self.contacts: list[dict] = []
+
+    def update(self, dets: list[dict], frame: str) -> list[dict]:
+        """Returns contacts that became confirmed on this frame."""
+        newly = []
+        for d in dets:
+            best = min(self.contacts, key=lambda c: math.dist(c["xy"], d["xy"]), default=None)
+            if best is not None and math.dist(best["xy"], d["xy"]) <= self.radius:
+                n = best["hits"]
+                best["xy"] = [round(float((best["xy"][i] * n + d["xy"][i]) / (n + 1)), 2) for i in (0, 1)]
+                best["hits"] += 1
+                if d["conf"] > best["conf"]:
+                    best.update(conf=d["conf"], frame=frame, size_m=d["size_m"], box=d["box"])
+                if best["hits"] == self.min_hits:
+                    best["id"] = f"c{sum(1 for c in self.contacts if c.get('id')) + 1}"
+                    newly.append(best)
+            else:
+                self.contacts.append({**d, "hits": 1, "frame": frame, "id": None})
+        return newly
+
+    def confirmed(self) -> list[dict]:
+        return [c for c in self.contacts if c.get("id")]
+
+
+# ---------------------------------------------------------------- imagine / classify (stand-ins)
+def inspection_pose(contact_xy, direction: str, keep_out: float = KEEP_OUT_M) -> dict:
+    """Pose `direction` of the contact, outside the keep-out circle, facing the contact."""
+    dx, dy = DIRECTIONS[direction]
+    d = keep_out + INSPECT_EXTRA_M + 1.0
+    x, y = contact_xy[0] + dx * d, contact_xy[1] + dy * d
+    return {"x": x, "y": y, "yaw": math.atan2(contact_xy[1] - y, contact_xy[0] - x)}
+
+
+def choose_view_standin(contact: dict, robot_pose: dict, keep_out: float = KEEP_OUT_M) -> dict:
+    """STAND-IN for P5's imagine_contact: pick the side nearest the robot (shortest move)."""
+    scores = {}
+    for name in DIRECTIONS:
+        ip = inspection_pose(contact["xy"], name, keep_out)
+        scores[name] = round(1.0 / (1.0 + math.dist((ip["x"], ip["y"]), (robot_pose["x"], robot_pose["y"]))), 3)
+    chosen = max(scores, key=scores.get)
+    return {"contact_id": contact["id"], "chosen": chosen, "scores": scores,
+            "pose": inspection_pose(contact["xy"], chosen, keep_out), "reason": "stand-in: nearest side"}
+
+
+def classify_standin(contact: dict, sonar: np.ndarray) -> dict:
+    """STAND-IN for P4's classify_contact: can't tell bomb from rock yet, so it says so."""
+    return {"contact_id": contact["id"], "class": "uncertain", "confidence": 0.5, "priority": 1,
+            "standoff_m": KEEP_OUT_M,
+            "reason": "Stand-in classifier: strong compact sonar return; treated as a possible mine until verified."}
+
+
+# ---------------------------------------------------------------- keep-out + path planning (P2)
+def _yawed(points):
+    out = []
+    for i, (x, y) in enumerate(points):
+        nx, ny = points[min(i + 1, len(points) - 1)]
+        px, py = points[max(i - 1, 0)]
+        out.append({"x": round(float(x), 3), "y": round(float(y), 3),
+                    "yaw": round(math.atan2(ny - py, nx - px), 4) if (nx, ny) != (px, py) else 0.0})
+    return out
+
+
+def straight(a: dict, b: dict, step: float = STEP_M) -> list[dict]:
+    n = max(int(math.dist((a["x"], a["y"]), (b["x"], b["y"])) / step), 1)
+    pts = [(a["x"] + (b["x"] - a["x"]) * k / n, a["y"] + (b["y"] - a["y"]) * k / n) for k in range(1, n + 1)]
+    return _yawed(pts)
+
+
+def detour(path: list[dict], circles: list[dict], step: float = STEP_M) -> list[dict]:
+    """Replace every run of poses inside a keep-out circle with an arc around it (shorter side)."""
+    for c in circles:
+        cx, cy = c["xy"]
+        r = c["r"] + CLEARANCE_M
+        out, i = [], 0
+        while i < len(path):
+            p = path[i]
+            if math.dist((p["x"], p["y"]), (cx, cy)) >= r:
+                out.append(p)
+                i += 1
+                continue
+            j = i
+            while j < len(path) and math.dist((path[j]["x"], path[j]["y"]), (cx, cy)) < r:
+                j += 1
+            a_pt = out[-1] if out else path[i]
+            b_pt = path[j] if j < len(path) else path[-1]
+            a0 = math.atan2(a_pt["y"] - cy, a_pt["x"] - cx)
+            a1 = math.atan2(b_pt["y"] - cy, b_pt["x"] - cx)
+            sweep = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi  # shorter way round
+            if abs(sweep) < 1e-3:
+                sweep = math.pi
+            n = max(int(abs(sweep) * r / step), 2)
+            arc = [(cx + r * math.cos(a0 + sweep * k / n), cy + r * math.sin(a0 + sweep * k / n)) for k in range(n + 1)]
+            out.extend(_yawed(arc))
+            i = j
+        path = out
+    return path
+
+
+def route(a: dict, b: dict, circles: list[dict]) -> list[dict]:
+    """Straight transit a -> b, bent around keep-out circles. Final pose keeps b's yaw."""
+    pts = detour(straight(a, b), circles)
+    if pts:
+        pts[-1] = {**pts[-1], "yaw": b.get("yaw", pts[-1]["yaw"])}
+    return pts
+
+
+def min_clearance(path: list[dict], xy) -> float:
+    return min((math.dist((p["x"], p["y"]), xy) for p in path), default=float("inf"))
+
+
+# ---------------------------------------------------------------- mission map (for previews)
+STATE_COLOURS = {"SURVEY": (120, 220, 120), "HOLD": (255, 90, 90), "REPLAN": (255, 170, 60),
+                 "INSPECT": (90, 180, 255), "RESUME": (120, 220, 120), "DONE": (200, 200, 200)}
+
+
+def draw_map(size, bounds, driven, remaining, old_paths, circles, contacts, targets, pose, state, banner, event):
+    """Top-down site map (PIL image). bounds = (x0, x1, y0, y1) in metres."""
+    from PIL import Image, ImageDraw
+
+    W, H = size
+    x0, x1, y0, y1 = bounds
+    s = min((W - 20) / (x1 - x0), (H - 60) / (y1 - y0))
+
+    def P(x, y):
+        return 10 + (x - x0) * s, H - 10 - (y - y0) * s
+
+    im = Image.new("RGB", (W, H), (12, 26, 38))
+    d = ImageDraw.Draw(im)
+    for old in old_paths:
+        pts = [P(q["x"], q["y"]) for q in old]
+        if len(pts) > 1:
+            d.line(pts, fill=(110, 110, 110), width=1)
+    if len(remaining) > 1:
+        d.line([P(q["x"], q["y"]) for q in remaining], fill=(90, 200, 120), width=2)
+    if len(driven) > 1:
+        d.line([P(q["x"], q["y"]) for q in driven], fill=(240, 240, 240), width=2)
+    for c in circles:
+        cx, cy = P(*c["xy"])
+        rr = c["r"] * s
+        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=(255, 70, 70), width=2)
+    verdict = {t["contact_id"]: t["class"] for t in targets}
+    for c in contacts:
+        cx, cy = P(*c["xy"])
+        col = {"UXO": (255, 60, 60), "non-UXO": (120, 220, 120), "uncertain": (255, 200, 60)}.get(
+            verdict.get(c["id"]), (255, 255, 255))
+        d.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=col)
+        d.text((cx + 6, cy - 6), c["id"], fill=col)
+    rx, ry = P(pose["x"], pose["y"])
+    yaw = pose["yaw"]
+    tri = [(rx + 9 * math.cos(yaw), ry - 9 * math.sin(yaw)),
+           (rx + 6 * math.cos(yaw + 2.5), ry - 6 * math.sin(yaw + 2.5)),
+           (rx + 6 * math.cos(yaw - 2.5), ry - 6 * math.sin(yaw - 2.5))]
+    d.polygon(tri, fill=(250, 200, 20))
+    d.rectangle([0, 0, W, 22], fill=(0, 0, 0))
+    d.text((8, 5), f"{state}: {banner}", fill=STATE_COLOURS.get(state, (255, 255, 255)))
+    if event:
+        d.rectangle([0, 24, W, 44], fill=(70, 0, 0))
+        d.text((8, 28), event, fill=(255, 220, 220))
+    return im
