@@ -46,6 +46,7 @@ SECONDS = {"SURVEY": 0.12, "RESUME": 0.15, "INSPECT": 0.3, "BACKOFF": 0.3, "HOLD
 PAUSE = {"event": 1.5, "hold": 1.5, "verdict": 4.0}  # extra seconds on key steps
 TITLE_S, END_S = 3.5, 6.0
 MAX_SECONDS = 58.0
+FAST_MIN_S = 0.03     # fastest a survey step may play (seconds on screen)
 MISSION_STEP_S = 1.0  # mission time per logged step (poses.csv t = step)
 VERDICT_SHOW_STEPS = 25  # verdict panel stays up this many steps after the verdict
 
@@ -65,21 +66,30 @@ class Mission:
         world = self._json("world.json", {})
         self.scenario, self.seed = world.get("scenario", ""), world.get("seed", "")
 
-        # Key moments, all read from the robot's own log
+        # Key moments, all read from the robot's own log. One step's decision can hold several
+        # parts joined by " | " (e.g. a revisit verdict followed by the next REVISIT).
         self.hold_at, self.verdict_at, self.old_routes = {}, {}, {}
+        self.revisit_at, self.revisit_verdict_at, self.revisit_murk = {}, {}, set()
         for e in self.log:
-            dec, i = e.get("decision", ""), e["step"]
-            m = re.search(r"\b(c\d+)\b", dec)
-            if not m:
-                continue
-            cid = m.group(1)
-            if dec.startswith("HOLD") and cid not in self.hold_at:
-                self.hold_at[cid] = i
-                before = self.log[i - 1] if i > 0 else e   # route as planned just before the hold
-                pose = e["pose"]
-                self.old_routes[cid] = [(pose["x"], pose["y"])] + [tuple(p) for p in before["planned_path"]]
-            elif dec.startswith("verdict") and cid not in self.verdict_at:
-                self.verdict_at[cid] = i
+            i = e["step"]
+            for dec in e.get("decision", "").split(" | "):
+                m = re.search(r"\b(c\d+)\b", dec)
+                if not m:
+                    continue
+                cid = m.group(1)
+                if dec.startswith("HOLD") and cid not in self.hold_at:
+                    self.hold_at[cid] = i
+                    before = self.log[i - 1] if i > 0 else e   # route as planned just before the hold
+                    pose = e["pose"]
+                    self.old_routes[cid] = [(pose["x"], pose["y"])] + [tuple(p) for p in before["planned_path"]]
+                elif dec.startswith("verdict") and cid not in self.verdict_at:
+                    self.verdict_at[cid] = i
+                elif dec.startswith("REVISIT:") and cid not in self.revisit_at:   # not "REVISIT postponed"
+                    self.revisit_at[cid] = i
+                    if "murky" in dec:
+                        self.revisit_murk.add(cid)
+                elif dec.startswith("revisit verdict") and cid not in self.revisit_verdict_at:
+                    self.revisit_verdict_at[cid] = i
         self.event_starts = [e["step"] for k, e in enumerate(self.log)
                              if e.get("event") and (k == 0 or not self.log[k - 1].get("event"))]
 
@@ -118,11 +128,37 @@ class Mission:
         after = [math.dist((e["pose"]["x"], e["pose"]["y"]), xy) for e in self.log[self.hold_at[cid]:]]
         return old, min(after)
 
+    def verdict(self, cid, i):
+        """The verdict as the robot knew it at step i (None before its first look).
+
+        targets.json holds the FINAL verdict. For a revisited contact, the first look is in
+        targets[cid]["first_look"] and the second look's inspection in viewpoints[cid]["revisit"].
+        Returns {class, confidence, reason, side, inspection, look, first_look}.
+        """
+        t, vp = self.targets.get(cid), self.viewpoints.get(cid, {})
+        if t is None or self.verdict_at.get(cid, 1 << 30) > i:
+            return None
+        if cid in self.revisit_verdict_at and self.revisit_verdict_at[cid] <= i:
+            rv = vp.get("revisit", {})
+            return {**t, "side": rv.get("chosen", "?"), "inspection": rv.get("inspection"),
+                    "look": 2, "first_look": t.get("first_look")}
+        first = t.get("first_look") if t.get("revisited") else None
+        if first:
+            return {**t, **first, "side": first.get("side", vp.get("chosen", "?")),
+                    "inspection": vp.get("inspection"), "look": 1, "first_look": None}
+        return {**t, "side": vp.get("chosen", "?"), "inspection": vp.get("inspection"), "look": 1,
+                "first_look": None}
+
+    def revisiting(self, cid, i):
+        """True from the moment the robot decides to look again at cid."""
+        return self.revisit_at.get(cid, 1 << 30) <= i
+
     def focus(self, i):
         """Contact the robot is dealing with at step i, and what to show: imagine / verdict / None."""
-        for cid, v in self.verdict_at.items():
-            if v <= i < v + VERDICT_SHOW_STEPS:
-                return cid, "verdict"
+        for at in (self.revisit_verdict_at, self.verdict_at):
+            for cid, v in at.items():
+                if v <= i < v + VERDICT_SHOW_STEPS:
+                    return cid, "verdict"
         state = self.log[i]["state"]
         if state in ("HOLD", "BACKOFF", "REPLAN", "INSPECT"):
             m = re.search(r"\b(c\d+)\b", self.log[i]["banner"])
@@ -142,7 +178,8 @@ def _header(canvas, m: Mission, e: dict, speed: float):
     label = STATE_LABELS.get(state, state)
     if state == "INSPECT":
         side = next((s for s in DIRECTIONS if s in e["banner"]), "")
-        label = f"INSPECTING FROM THE {side.upper()}" if side else label
+        again = "re-inspect" in e["banner"]
+        label = (f"{'RE-INSPECTING' if again else 'INSPECTING'} FROM THE {side.upper()}" if side else label)
     colour = STATE_COLOURS.get(state, TEXT)
     lw = d.textlength(label, font=_font(22, True))
     d.rounded_rectangle((330, 14, 330 + lw + 32, 52), radius=8, fill=colour)
@@ -240,7 +277,7 @@ def _map(canvas, m: Mission, i: int, box):
         d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(239, 68, 68), width=2)
     for c in e["contacts"]:
         cx, cy = P(*c["xy"])
-        t = m.targets.get(c["id"]) if m.verdict_at.get(c["id"], 1 << 30) <= i else None
+        t = m.verdict(c["id"], i)
         colour = CLASS_COLOURS.get(t["class"], TEXT) if t else TEXT
         d.ellipse((cx - 7, cy - 7, cx + 7, cy + 7), outline=colour, width=3)
         d.text((cx + 10, cy - 10), c["id"] + (f"  {t['class']}" if t else ""), font=_font(16, True), fill=colour)
@@ -291,6 +328,12 @@ def _imagine(canvas, m: Mission, cid: str, i: int, box):
         d.text((box[0] + 20, box[1] + 60), "no viewpoint recorded for this contact", font=_font(18), fill=MUTED)
         return
     reveal = m.log[i]["state"] not in ("HOLD", "BACKOFF")      # scores + choice once re-planning starts
+    again = m.revisiting(cid, i) and "revisit" in vp
+    tried = vp["chosen"] if again else None                     # side already looked from
+    best = vp["revisit"]["chosen"] if again else vp["chosen"]
+    scores = vp["revisit"].get("scores", vp["scores"]) if again else vp["scores"]
+    if again:
+        _panel(d, box, f"Looking again at {cid}: next-best side")
     tile, gap = 116, 14
     gx0 = (box[0] + box[2]) // 2 - (4 * tile + 3 * gap) // 2 + 24
     gy0 = box[1] + 80
@@ -299,10 +342,10 @@ def _imagine(canvas, m: Mission, cid: str, i: int, box):
     has_imgs = any(vp.get("imagined", {}).values())
     for k, side in enumerate(DIRECTIONS):
         x = gx0 + k * (tile + gap)
-        chosen = reveal and side == vp["chosen"]
-        score = vp["scores"].get(side)
-        label = side + (f" {score:.2f}" if reveal and score is not None else "")
-        d.text((x, gy0 - 28), label, font=_font(16, chosen), fill=ACCENT if chosen else TEXT)
+        chosen = reveal and side == best
+        score = scores.get(side)
+        label = side + (" (tried)" if side == tried and side != best else f" {score:.2f}" if reveal and score is not None else "")
+        d.text((x, gy0 - 28), label, font=_font(16, chosen), fill=ACCENT if chosen else MUTED if side == tried else TEXT)
         for j, rel in enumerate(vp.get("imagined", {}).get(side, [])[:2]):
             ty = gy0 + j * (tile + 6)
             _paste_fit(canvas, m.image(rel), (x, ty, x + tile, ty + tile), outline=ACCENT if chosen else None)
@@ -313,8 +356,16 @@ def _imagine(canvas, m: Mission, cid: str, i: int, box):
     ty = gy0 + 2 * tile + 46
     if not has_imgs:
         d.text((box[0] + 20, gy0 + 40), "(imagined pictures not saved in this run)", font=_font(16), fill=MUTED)
-    msg = (f"Going to the {vp['chosen']} side: that's where a bomb and a rock would look most different."
-           if reveal else "Picturing a bomb and a rock at this spot, seen from north, east, south and west…")
+    if again and cid in m.revisit_murk:
+        msg = (f"The water was murky when it looked from the {tried}, so that verdict isn't trusted. "
+               f"Looking again from the {best} now the water is clear.")
+    elif again:
+        msg = (f"Still unsure after looking from the {tried}. Going back to look from the {best}, "
+               "the next side where a bomb and a rock would differ most.")
+    elif reveal:
+        msg = f"Going to the {best} side: that's where a bomb and a rock would look most different."
+    else:
+        msg = "Picturing a bomb and a rock at this spot, seen from north, east, south and west…"
     for line in _wrap(msg, _font(18), box[2] - box[0] - 40, d):
         d.text((box[0] + 20, ty), line, font=_font(18), fill=ACCENT if reveal else TEXT)
         ty += 26
@@ -322,22 +373,33 @@ def _imagine(canvas, m: Mission, cid: str, i: int, box):
            font=_font(14), fill=MUTED)
 
 
-def _verdict(canvas, m: Mission, cid: str, box):
+def _verdict(canvas, m: Mission, cid: str, i: int, box):
     d = ImageDraw.Draw(canvas)
-    vp, t = m.viewpoints.get(cid, {}), m.targets.get(cid)
-    _panel(d, box, f"Inspection of {cid} from the {vp.get('chosen', '?')}")
-    _paste_fit(canvas, m.image(vp.get("inspection"), "L"), (box[0] + 20, box[1] + 44, box[0] + 260, box[1] + 284))
+    t = m.verdict(cid, i)
     if not t:
-        d.text((box[0] + 280, box[1] + 60), "no verdict", font=_font(22), fill=MUTED)
+        _panel(d, box, f"Inspection of {cid}")
+        d.text((box[0] + 20, box[1] + 60), "no verdict", font=_font(22), fill=MUTED)
         return
+    look = "Second look" if t["look"] == 2 else "Inspection"
+    _panel(d, box, f"{look}: {cid} from the {t['side']}")
+    ins = t.get("inspection")
+    _paste_fit(canvas, m.image(ins, "L"), (box[0] + 20, box[1] + 44, box[0] + 260, box[1] + 284))
+    cam = m.image(ins[:-4] + "_cam.png", "RGB") if ins else None   # camera aimed at the contact
+    if cam is not None:
+        _paste_fit(canvas, cam, (box[0] + 280, box[1] + 164, box[2] - 20, box[1] + 284))
     x = box[0] + 280
-    d.text((x, box[1] + 50), t["class"], font=_font(48, True), fill=CLASS_COLOURS.get(t["class"], TEXT))
-    d.text((x, box[1] + 112), f"confidence {t['confidence']:.2f}", font=_font(20), fill=TEXT)
-    d.text((x, box[1] + 140), f"priority {t['priority']}", font=_font(20), fill=TEXT)
+    d.text((x, box[1] + 44), t["class"], font=_font(48, True), fill=CLASS_COLOURS.get(t["class"], TEXT))
+    d.text((x, box[1] + 104), f"confidence {t['confidence']:.2f}   priority {t.get('priority', '?')}",
+           font=_font(19), fill=TEXT)
+    y = box[1] + 132
+    if t.get("first_look"):
+        f = t["first_look"]
+        d.text((x, y), f"first look from the {f.get('side', '?')}: {f.get('class', '?')}",
+               font=_font(17, True), fill=CLASS_COLOURS.get(f.get("class"), MUTED))
     y = box[1] + 300
-    for line in _wrap(f"“{t['reason']}”", _font(19), box[2] - box[0] - 40, d)[:6]:
-        d.text((box[0] + 20, y), line, font=_font(19), fill=MUTED)
-        y += 27
+    for line in _wrap(f"“{t['reason']}”", _font(18), box[2] - box[0] - 40, d)[:5]:
+        d.text((box[0] + 20, y), line, font=_font(18), fill=MUTED)
+        y += 25
     d.text((box[0] + 20, box[3] - 30), "Detection and prioritisation only. Humans dispose.",
            font=_font(14), fill=MUTED)
 
@@ -355,7 +417,8 @@ def mission_frame(m: Mission, i: int, speed: float = 1.0) -> Image.Image:
         _event_bar(canvas, e["event"])
     _sonar(canvas, m, e, (24, top, 644, 692))
     d = ImageDraw.Draw(canvas)
-    _panel(d, (24, 708, 644, 1056), "Robot camera")
+    degraded = "[CAMERA DEGRADED" in e["banner"]
+    _panel(d, (24, 708, 644, 1056), "Robot camera: murky, relying on sonar" if degraded else "Robot camera")
     _paste_fit(canvas, m.frame("cam", i), (44, 746, 624, 1044))
     _map(canvas, m, i, (664, top, 1268, 1056))
     _panel(d, (1288, top, 1896, top + 360), "Chase view")
@@ -363,7 +426,7 @@ def mission_frame(m: Mission, i: int, speed: float = 1.0) -> Image.Image:
     cid, mode = m.focus(i)
     right = (1288, top + 376, 1896, 1056)
     if mode == "verdict":
-        _verdict(canvas, m, cid, right)
+        _verdict(canvas, m, cid, i, right)
     elif mode == "imagine":
         _imagine(canvas, m, cid, i, right)
     else:
@@ -420,6 +483,12 @@ def end_frame(m: Mission) -> Image.Image:
         colour = CLASS_COLOURS.get(t["class"], TEXT)
         d.text((1024, yy), f"#{t['priority']}  {t['contact_id']}  {t['class']}", font=_font(26, True), fill=colour)
         yy += 36
+        if t.get("revisited") and t.get("first_look"):
+            f = t["first_look"]
+            d.text((1024, yy), f"looked twice: {f.get('class')} from the {f.get('side')}, then {t['class']} "
+                   f"from the {m.viewpoints.get(t['contact_id'], {}).get('revisit', {}).get('chosen', '?')}",
+                   font=_font(17, True), fill=TEXT)
+            yy += 26
         for line in _wrap(t["reason"], _font(17), 840, d)[:3]:
             d.text((1024, yy), line, font=_font(17), fill=MUTED)
             yy += 24
@@ -438,16 +507,21 @@ def _durations(m: Mission) -> list:
         pauses[s] = pauses.get(s, 0) + PAUSE["event"]
     for s in m.hold_at.values():
         pauses[s] = pauses.get(s, 0) + PAUSE["hold"]
-    for s in m.verdict_at.values():
+    for s in list(m.verdict_at.values()) + list(m.revisit_verdict_at.values()):
         pauses[s] = pauses.get(s, 0) + PAUSE["verdict"]
     base = [SECONDS.get(e["state"], 0.15) for e in m.log]
-    fixed = TITLE_S + END_S + sum(pauses.values())
-    slow = sum(b for b, e in zip(base, m.log) if e["state"] not in ("SURVEY", "RESUME"))
-    fast = sum(base) - slow
-    budget = MAX_SECONDS - fixed - slow
-    k = min(1.0, max(budget, 1.0) / fast) if fast else 1.0
-    out = [b * (k if e["state"] in ("SURVEY", "RESUME") else 1.0) for b, e in zip(base, m.log)]
-    return out, pauses
+    is_fast = [e["state"] in ("SURVEY", "RESUME") for e in m.log]
+    target = MAX_SECONDS - TITLE_S - END_S
+    slow = sum(b for b, f in zip(base, is_fast) if not f) + sum(pauses.values())
+    fast = sum(b for b, f in zip(base, is_fast) if f)
+    # 1) speed up survey steps, down to FAST_MIN_S each
+    k_fast = min(1.0, max(target - slow, 0.0) / fast) if fast else 1.0
+    k_fast = max(k_fast, FAST_MIN_S / SECONDS["SURVEY"])
+    # 2) long missions (many contacts): also speed up decisions and pauses, proportionally
+    left = target - fast * k_fast
+    k_slow = min(1.0, max(left, 0.0) / slow) if slow else 1.0
+    out = [b * (k_fast if f else k_slow) for b, f in zip(base, is_fast)]
+    return out, {s: p * k_slow for s, p in pauses.items()}
 
 
 def run(run_dir: str, out_path: str | None = None) -> str:
@@ -492,6 +566,10 @@ def preview(run_dir: str, out_dir: str) -> list:
             picks["replan"] = steps[0]
         if cid in m.verdict_at:
             picks["verdict"] = m.verdict_at[cid] + 1
+    for cid, k in list(m.revisit_at.items())[:1]:
+        picks["revisit"] = k + 1
+        if cid in m.revisit_verdict_at:
+            picks["revisit_verdict"] = m.revisit_verdict_at[cid] + 1
     picks["late"] = len(m.log) - 1
     written = []
     for name, i in picks.items():
