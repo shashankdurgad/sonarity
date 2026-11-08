@@ -254,12 +254,29 @@ def to_image(polar):
 # Public API used by agent/imagine.py
 # =====================================================================================
 
+def hypothesis_size(contact, cls):
+    """Size (length, width) to imagine `cls` at, from the detection.
+
+    Detector boxes are much fatter than the object (e.g. 2.3 x 1.6 m for a 1.9 x 0.5 m bomb),
+    and a fat "bomb" looks like a rock from every side. So a bomb keeps its class proportions
+    (long and thin) and takes only its length from the detection, clamped to a plausible range.
+    Other classes use the detected size as is.
+    """
+    size = contact["size_m"]
+    if cls != "aerial_bomb":
+        return size
+    length, width = CANONICAL_SIZE_M[cls]
+    detected = float(np.clip(max(size), 0.7 * length, 1.4 * length))
+    return (detected, detected * width / length)
+
+
 def hypothesis_scene(contact, cls, yaw=None, seed=0):
     """Clean scene: flat seabed + one object of class `cls` built from the contact only."""
     x, y = contact["xy"]
     scene = Scene(x, y, seed=seed)
     if cls is not None:
-        scene.add(cls, (x, y), contact.get("yaw", 0.0) if yaw is None else yaw, contact["size_m"])
+        scene.add(cls, (x, y), contact.get("yaw", 0.0) if yaw is None else yaw,
+                  hypothesis_size(contact, cls))
     return scene
 
 

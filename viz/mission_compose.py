@@ -173,6 +173,7 @@ def _sonar(canvas, m: Mission, e: dict, box):
     s = min((inner[2] - inner[0]) / img.width, (inner[3] - inner[1]) / img.height)
     ox = inner[0] + ((inner[2] - inner[0]) - img.width * s) / 2
     oy = inner[1] + ((inner[3] - inner[1]) - img.height * s) / 2
+    placed = []  # label positions so far, to stack labels of overlapping detections
     for det in e.get("dets", []):
         col, row = world_to_pixel(det["xy"][0], det["xy"][1], e["pose"])
         if not (0 <= col < img.width and 0 <= row < img.height):
@@ -180,7 +181,14 @@ def _sonar(canvas, m: Mission, e: dict, box):
         x, y, r = ox + col * s, oy + row * s, 22
         colour = (250, 204, 21)
         d.rectangle((x - r, y - r, x + r, y + r), outline=colour, width=3)
-        d.text((x + r + 6, y - r), f"{det['cls']} {det['conf']:.2f}", font=_font(15, True), fill=colour)
+        label = f"{det['cls']} {det['conf']:.2f}"
+        lw = d.textlength(label, font=_font(15, True))
+        lx = x + r + 6 if x + r + 6 + lw < box[2] - 8 else x - r - 6 - lw   # keep inside the panel
+        ly = y - r
+        while any(abs(ly - py) < 18 and abs(lx - px) < 120 for px, py in placed):
+            ly += 18
+        placed.append((lx, ly))
+        d.text((lx, ly), label, font=_font(15, True), fill=colour)
     n = len(e.get("dets", []))
     d.text((box[0] + 20, box[3] - 28), f"{n} detection{'s' if n != 1 else ''} this frame (YOLO)",
            font=_font(15), fill=MUTED)
@@ -385,23 +393,26 @@ def end_frame(m: Mission) -> Image.Image:
     d = ImageDraw.Draw(canvas)
     d.text((24, 16), "Look Before You Dive", font=_font(28, True), fill=TEXT)
     d.text((330, 22), "What the robot did", font=_font(22), fill=ACCENT)
-    y = 110
-    for cid in m.hold_at:
+    # Lead with the closest call (smallest old-route clearance); others get one line each.
+    held = sorted(m.hold_at, key=lambda c: m.clearances(c)[0])
+    for n, cid in enumerate(held[:3]):
         old, new = m.clearances(cid)
-        d.text((80, y), f"{cid}: closest approach", font=_font(30, True), fill=TEXT)
-        d.text((80, y + 50), f"{old:.1f} m", font=_font(84, True), fill=WARN)
-        d.text((80, y + 150), "on the old route", font=_font(22), fill=MUTED)
-        d.text((400, y + 70), "to", font=_font(48, True), fill=MUTED)
-        d.text((540, y + 50), f"{new:.1f} m", font=_font(84, True), fill=(34, 197, 94))
-        d.text((540, y + 150), "what it actually did", font=_font(22), fill=MUTED)
         evs = [s for s in m.event_starts if s <= m.hold_at[cid]]
-        if evs:
-            d.text((80, y + 200), f"change at t {evs[-1] * MISSION_STEP_S:.0f} s, stopped at "
-                   f"t {m.hold_at[cid] * MISSION_STEP_S:.0f} s, seen by its own sonar",
-                   font=_font(22), fill=TEXT)
-        y += 280
-        if y > 400:
-            break
+        if n == 0:
+            d.text((80, 100), f"{cid}: closest approach (distances scaled to a 32 m test site)",
+                   font=_font(26, True), fill=TEXT)
+            d.text((80, 140), f"{old:.1f} m", font=_font(84, True), fill=WARN)
+            d.text((80, 240), "on the old route", font=_font(22), fill=MUTED)
+            d.text((400, 160), "to", font=_font(48, True), fill=MUTED)
+            d.text((540, 140), f"{new:.1f} m", font=_font(84, True), fill=(34, 197, 94))
+            d.text((540, 240), "what it actually did", font=_font(22), fill=MUTED)
+            if evs:
+                d.text((80, 284), f"change at t {evs[-1] * MISSION_STEP_S:.0f} s, stopped at "
+                       f"t {m.hold_at[cid] * MISSION_STEP_S:.0f} s, seen by its own sonar",
+                       font=_font(20), fill=TEXT)
+        else:
+            d.text((80, 300 + 34 * n), f"{cid}: old route {old:.1f} m, actually {new:.1f} m",
+                   font=_font(20), fill=MUTED)
     _map(canvas, m, len(m.log) - 1, (24, 400, 980, 1056))
     _panel(d, (1000, 90, 1896, 1000), "Target list for the disposal team")
     yy = 140
