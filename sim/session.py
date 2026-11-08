@@ -320,15 +320,22 @@ class SimSession:
         for _ in range(self._warmup):
             self.world_api.step(render=True)
 
-    def move_to(self, x: float, y: float, yaw: float, altitude: float | None = None):
-        """Teleport the sensor rig. yaw in radians, 0 = +x, CCW."""
+    def move_to(self, x: float, y: float, yaw: float, altitude: float | None = None, cam_look_at=None):
+        """Teleport the sensor rig. yaw in radians, 0 = +x, CCW.
+        cam_look_at=(x, y): pan-tilt the robot camera onto that seabed point (used during inspections;
+        the survey pitch only sees sand ~2.7 m ahead)."""
         alt = self.p.altitude if altitude is None else altitude
         deg = math.degrees(yaw)
         self.sonar.set_world_pose(position=np.array([x, y, alt]),
                                   orientation=self._q(np.array([0.0, self.p.pitch, deg]), degrees=True))
         cx, cy = x - 0.1 * math.cos(yaw), y - 0.1 * math.sin(yaw)
+        cam_yaw, cam_pitch = deg, CAM_PITCH
+        if cam_look_at is not None:
+            tx, ty = cam_look_at
+            cam_yaw = math.degrees(math.atan2(ty - cy, tx - cx))
+            cam_pitch = math.degrees(math.atan2(alt - 0.2 - 0.25, max(math.dist((cx, cy), (tx, ty)), 0.5)))
         self.cam.set_world_pose(position=np.array([cx, cy, alt - 0.2]),
-                                orientation=self._q(np.array([0.0, CAM_PITCH, deg]), degrees=True))
+                                orientation=self._q(np.array([0.0, cam_pitch, cam_yaw]), degrees=True))
         if self._auv is not None:
             from pxr import Gf
 

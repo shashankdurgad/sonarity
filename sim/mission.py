@@ -284,7 +284,11 @@ while queue and step < args.max_steps:
         print(f"[mission] step {step}: {caption}", flush=True)
     it = queue.popleft()
     pose = it["pose"]
-    sim.move_to(pose["x"], pose["y"], pose["yaw"])
+    look = None
+    if it.get("view"):  # at the inspection pose: point the camera at the contact
+        lc = next((x for x in tracker.confirmed() if x["id"] == it["contact"]), None)
+        look = tuple(lc["xy"]) if lc else None
+    sim.move_to(pose["x"], pose["y"], pose["yaw"], cam_look_at=look)
     sonar, cam = sim.observe()
     chase = sim.chase()
     name = f"{step:06d}"
@@ -310,6 +314,7 @@ while queue and step < args.max_steps:
         view = it["view"]
         ip = f"inspections/{c['id']}_{view['chosen']}.png"
         Image.fromarray(sonar, mode="L").save(os.path.join(out, ip))
+        Image.fromarray(cam).save(os.path.join(out, ip[:-4] + "_cam.png"))  # camera aimed at the contact
         if classify_contact is not None:
             try:
                 tgt = classify_contact(c, os.path.join(out, ip), view)
