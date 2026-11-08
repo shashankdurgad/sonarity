@@ -121,6 +121,6 @@ Every mission writes `runs/<id>/timing.json`, and `mission_log.jsonl` has a `tim
 | Sonar + camera render | Isaac Sim / OceanSim on a Modal L40S (stands in for the real sensors) | 0.16 s | about 99 s on the first frame only (GPU kernel compile) |
 | Detection (YOLOv8n) | `uxo-detector` Modal service, GPU (P1) | 0.09 s | 0.29 s |
 | Imagine + A* re-plan | On the robot: NumPy, CPU (P5 + P2) | 1.0 s | 1.0 s |
-| Classify | On the robot: template rule (P4). Gemini isn't available in the sim container | < 1 ms | |
+| Classify | Gemini via REST, 8 s timeout, template fallback (P1 + P4). Run `postmerge_clear_sand_s1` | about 4.1 s | 4.1 s |
 
-The robot holds position while it imagines and classifies, so none of this is on the critical path for safety. Detection is: about 0.1 s per frame against a 0.75 m step.
+The robot holds position while it imagines and classifies, so none of this is on the critical path for safety. **Autonomy note for the summary:** the classify step calls a remote model (Gemini). If it times out or fails, the on-robot template decides, so the robot never depends on the link to stay safe. Holding, keep-out and re-planning are always local. Detection is: about 0.1 s per frame against a 0.75 m step.
