@@ -51,7 +51,12 @@ class SimSession:
     def __init__(self, sonar: SonarParams = SonarParams(), flip_azimuth: bool = False, warmup: int = 20,
                  sun: float = 300.0, dome: float = 80.0, sonar_norm: str = "all",
                  sonar_gamma: float = 1.0, sonar_gain: float = 8.0, chase: bool = True,
-                 seabed_bounds: tuple | None = None):
+                 seabed_bounds: tuple | None = None, world: dict | None = None,
+                 reserve: dict | None = None):
+        """Pass `world` (and `reserve` counts for live events) HERE rather than calling load_world()
+        later: objects created after the sensors start rendering may never get their sonar labels
+        registered (a timing race), so the sonar shows them as shadows with no echo."""
+        self._sensors_ready = False
         self._init_seabed_bounds = tuple(seabed_bounds) if seabed_bounds else DEFAULT_SEABED
         self._chase_enabled = chase
         self.chase_cam = None
@@ -87,8 +92,16 @@ class SimSession:
         self._sun_light = UsdLux.DistantLight.Define(self.stage, "/World/Sun")
         self._dome_light = UsdLux.DomeLight.Define(self.stage, "/World/Dome")
         self.set_lights(self._sun, self._dome)
+        if world is not None and seabed_bounds is None:
+            self._init_seabed_bounds = seabed_bounds_for(world)
         self._build_seabed(bounds=self._init_seabed_bounds)
+        if world is not None:
+            self.load_world(world)
+            if reserve:
+                xs, ys = [o["xyz"][0] for o in world["objects"]], [o["xyz"][1] for o in world["objects"]]
+                self.reserve(reserve, park_xy=((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2))
         self._make_sensors()
+        self._sensors_ready = True
 
     # ---------- scene ----------
     def _label(self, prim, reflectivity: float, cls: str):
@@ -241,7 +254,11 @@ class SimSession:
                 self.stage, obj, parent_path="/World/SurveySite/Objects", semantic_labeler=self._scene_labeler)
 
     def load_world(self, world: dict):
-        """Build all objects from a world.json dict. Uses P3's sim/scene.py if present."""
+        """Build all objects from a world.json dict. Uses P3's sim/scene.py if present.
+        Prefer SimSession(world=...): see the constructor docstring."""
+        if getattr(self, "_sensors_ready", False):
+            print("[session] WARNING load_world() after sensors started: the sonar may not echo these objects; "
+                  "pass world= to SimSession instead", flush=True)
         self.world = {**world, "objects": [dict(o, xyz=list(o["xyz"])) for o in world["objects"]]}
         need, b = seabed_bounds_for(self.world), self._seabed_bounds
         if need[0] < b[0] or need[1] > b[1] or need[2] < b[2] or need[3] > b[3]:

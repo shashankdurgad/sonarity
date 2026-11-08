@@ -37,7 +37,7 @@ t0 = time.time()
 p = SonarParams()
 world = get_world(args.seed, args.scenario)  # pure Python; decides the seabed size before Isaac starts
 sim = SimSession(sonar=p, flip_azimuth=args.flip_azimuth, chase=not args.no_chase,
-                 seabed_bounds=seabed_bounds_for(world))
+                 seabed_bounds=seabed_bounds_for(world), world=world)  # world built before sensors start
 print(f"[survey] Isaac + sensors ready in {time.time() - t0:.0f}s", flush=True)
 
 from PIL import Image, ImageDraw  # noqa: E402
@@ -46,7 +46,6 @@ out = args.out
 for d in ("sonar", "cam", "chase", "labels", "_preview", "_preview_labels"):
     os.makedirs(os.path.join(out, d), exist_ok=True)
 
-sim.load_world(world)
 with open(os.path.join(out, "world.json"), "w") as f:
     json.dump(world, f, indent=2)
 

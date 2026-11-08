@@ -59,12 +59,9 @@ DETECTOR = "P1 detect_frame" if detect_frame is not ml.detect_frame_standin else
 t0 = time.time()
 p = SonarParams()
 world = get_world(args.seed, args.scenario)
-sim = SimSession(sonar=p, seabed_bounds=seabed_bounds_for(world))
-sim.load_world(world)
-# Objects for live events must exist before the first sonar scan (see SimSession.reserve).
-_a = survey_area(world)
-sim.reserve({"aerial_bomb": 2, "sphere_mine": 1, "rock": 1, "tyre": 1},
-            park_xy=((_a[0] + _a[1]) / 2, (_a[2] + _a[3]) / 2))
+# World + hidden event objects are built BEFORE the sensors start (see SimSession docstring).
+sim = SimSession(sonar=p, seabed_bounds=seabed_bounds_for(world), world=world,
+                 reserve={"aerial_bomb": 2, "sphere_mine": 1, "rock": 1, "tyre": 1})
 print(f"[mission] Isaac ready in {time.time() - t0:.0f}s; detector: {DETECTOR}", flush=True)
 
 from PIL import Image, ImageDraw  # noqa: E402
@@ -110,7 +107,7 @@ def point_ahead(dist_lo=11.0, dist_hi=13.0):
         prev = (q["x"], q["y"])
         if acc >= target:
             return q
-    return queue[-1]["pose"] if queue else pose
+    return None  # not enough route left ahead
 
 
 def handle_event(ev):
@@ -119,12 +116,18 @@ def handle_event(ev):
     if kind in ("uncover_bomb", "drop_object"):
         cls = "aerial_bomb" if kind == "uncover_bomb" else ev.get("cls", "aerial_bomb")
         q = point_ahead()
-        lat = random.uniform(-0.7, 0.7)
+        if q is None:
+            return "event skipped: less than ~13 m of route left ahead of the robot"
+        # 1-1.6 m off the centreline (well inside the 4 m keep-out, so the route must change) and angled
+        # 35-85 deg across the route: end-on bombs give almost no echo and dead-ahead sits in OceanSim's
+        # centre streak. Timing and exact spot stay random; a person triggers it.
+        lat = random.choice((-1, 1)) * random.uniform(1.0, 1.6)
         x, y = q["x"] - lat * math.sin(q["yaw"]), q["y"] + lat * math.cos(q["yaw"])
+        yaw = q["yaw"] + random.choice((-1, 1)) * random.uniform(0.6, 1.5)
         burial = 0.2 if kind == "uncover_bomb" else 0.0
         try:
             sim.apply_change({"type": "reveal_object", "cls": cls, "xy": [round(x, 2), round(y, 2)],
-                              "yaw": round(random.uniform(-math.pi, math.pi), 3), "burial": burial})
+                              "yaw": round(yaw, 3), "burial": burial})
         except ValueError as e:
             return f"event ignored: {e}"
         what = "seabed scour uncovers a bomb" if kind == "uncover_bomb" else f"a {cls} appears"
@@ -162,17 +165,34 @@ def plan_inspection(c, here):
     circles.append({"id": c["id"], "xy": c["xy"], "r": ml.KEEP_OUT_M})
     old_paths.append([here] + old)
     new_rest = ml.detour(old, circles)
-    view = ml.choose_view_standin(c, here)
+    view = ml.choose_view_standin(c, here, circles=circles)
     insp = view["pose"]
+    if not ml.pose_clear(insp, circles):  # every side blocked: back off further on the chosen side
+        dx, dy = ml.DIRECTIONS[view["chosen"]]
+        for extra in (1.5, 3.0, 4.5):
+            cand = {**insp, "x": insp["x"] + dx * extra, "y": insp["y"] + dy * extra}
+            if ml.pose_clear(cand, circles):
+                insp = view["pose"] = cand
+                break
     k = min(range(len(new_rest)), key=lambda i: math.dist((new_rest[i]["x"], new_rest[i]["y"]), c["xy"])) if new_rest else 0
-    to_insp = ml.route(here, insp, circles)
+    backoff = []
+    if not ml.pose_clear(here, circles, margin=0.0):
+        # Confirmed too late: retrace the driven path until clear of every keep-out zone.
+        for q in reversed(driven):
+            backoff.append({"x": q["x"], "y": q["y"], "yaw": q["yaw"]})
+            if ml.pose_clear(q, circles, margin=0.3):
+                break
+    start = backoff[-1] if backoff else here
+    to_insp = ml.route(start, insp, circles)
     back = ml.route(insp, new_rest[k], circles) if new_rest else []
     why = f"{c['id']} mine-like, {clearance:.1f} m from planned route (keep-out {ml.KEEP_OUT_M:.0f} m)"
     queue.clear()
     for _ in range(6):
         queue.append(item(here, "HOLD", f"CONTACT {c['id']} AHEAD: stopping. {why}", contact=c["id"]))
+    for q in backoff:
+        queue.append(item(q, "BACKOFF", f"inside {c['id']} keep-out zone: backing off", contact=c["id"]))
     for _ in range(4):
-        queue.append(item(here, "REPLAN", f"re-planning route around {c['id']} keep-out zone", contact=c["id"]))
+        queue.append(item(start, "REPLAN", f"re-planning route around {c['id']} keep-out zone", contact=c["id"]))
     for q in to_insp:
         queue.append(item(q, "INSPECT", f"moving to inspect {c['id']} from the {view['chosen']}", contact=c["id"]))
     for n in range(4):
@@ -247,13 +267,16 @@ while queue and step < args.max_steps:
                            "imagined": {}, "inspection": ip})
         decision = f"verdict {c['id']}: {tgt['class']} ({tgt['reason']})"
 
-    if it["state"] in ("SURVEY",) and pending:
+    # Safety rule: act on a new contact in ANY moving state (a contact seen while resuming or transiting
+    # to an inspection must still stop the robot). Only HOLD/REPLAN/BACKOFF defer it (robot not advancing).
+    if it["state"] in ("SURVEY", "RESUME", "INSPECT") and pending:
         while pending:
             c = pending.pop(0)
             if c["id"] in handled:
                 continue
             handled.add(c["id"])
-            clearance = ml.min_clearance(remaining_survey(), c["xy"])
+            route_ahead = [pose] + [q["pose"] for q in queue]
+            clearance = ml.min_clearance(route_ahead, c["xy"])
             if c["cls"] == "mine_like" and clearance < ml.KEEP_OUT_M + ml.CLEARANCE_M:
                 decision = "HOLD: " + plan_inspection(c, pose)
                 break

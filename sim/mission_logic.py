@@ -50,6 +50,10 @@ def _score_map(a: np.ndarray, p: SonarParams, block: int = 4) -> np.ndarray:
         sd[m] = np.median(np.abs(v - med)) * 1.48 + 1
     z = (blk - bg) / sd
     z[~valid] = 0
+    # OceanSim draws a bright vertical streak down the centre (= dead ahead), so mask it.
+    # KNOWN LIMITATION: this makes the stand-in blind within about ±0.6 m of dead ahead
+    # (column subtraction was tried: no better, and it added false contacts). Live events are
+    # placed 1-1.6 m off the route centreline. Check P1's detector for the same blind spot.
     c = n // 2
     z[:, c - 4:c + 4] = 0
     return z
@@ -120,11 +124,21 @@ def inspection_pose(contact_xy, direction: str, keep_out: float = KEEP_OUT_M) ->
     return {"x": x, "y": y, "yaw": math.atan2(contact_xy[1] - y, contact_xy[0] - x)}
 
 
-def choose_view_standin(contact: dict, robot_pose: dict, keep_out: float = KEEP_OUT_M) -> dict:
-    """STAND-IN for P5's imagine_contact: pick the side nearest the robot (shortest move)."""
+def pose_clear(pose: dict, circles: list[dict], margin: float = 0.3) -> bool:
+    """True if the pose is outside every keep-out circle (plus margin)."""
+    return all(math.dist((pose["x"], pose["y"]), c["xy"]) >= c["r"] + margin for c in circles)
+
+
+def choose_view_standin(contact: dict, robot_pose: dict, keep_out: float = KEEP_OUT_M,
+                        circles: list[dict] = ()) -> dict:
+    """STAND-IN for P5's imagine_contact: pick the side nearest the robot (shortest move), skipping
+    sides whose inspection pose would sit inside ANY keep-out circle."""
     scores = {}
     for name in DIRECTIONS:
         ip = inspection_pose(contact["xy"], name, keep_out)
+        if not pose_clear(ip, circles):
+            scores[name] = 0.0
+            continue
         scores[name] = round(1.0 / (1.0 + math.dist((ip["x"], ip["y"]), (robot_pose["x"], robot_pose["y"]))), 3)
     chosen = max(scores, key=scores.get)
     return {"contact_id": contact["id"], "chosen": chosen, "scores": scores,
@@ -155,8 +169,17 @@ def straight(a: dict, b: dict, step: float = STEP_M) -> list[dict]:
     return _yawed(pts)
 
 
-def detour(path: list[dict], circles: list[dict], step: float = STEP_M) -> list[dict]:
-    """Replace every run of poses inside a keep-out circle with an arc around it (shorter side)."""
+def detour(path: list[dict], circles: list[dict], step: float = STEP_M, passes: int = 4) -> list[dict]:
+    """Replace every run of poses inside a keep-out circle with an arc around it (shorter side).
+    Repeats, because an arc around one circle can cut into a neighbouring one."""
+    for _ in range(passes):
+        path = _detour_once(path, circles, step)
+        if all(pose_clear(q, circles, margin=0.0) for q in path):
+            break
+    return path
+
+
+def _detour_once(path: list[dict], circles: list[dict], step: float) -> list[dict]:
     for c in circles:
         cx, cy = c["xy"]
         r = c["r"] + CLEARANCE_M
@@ -198,7 +221,7 @@ def min_clearance(path: list[dict], xy) -> float:
 
 
 # ---------------------------------------------------------------- mission map (for previews)
-STATE_COLOURS = {"SURVEY": (120, 220, 120), "HOLD": (255, 90, 90), "REPLAN": (255, 170, 60),
+STATE_COLOURS = {"SURVEY": (120, 220, 120), "HOLD": (255, 90, 90), "BACKOFF": (255, 60, 160), "REPLAN": (255, 170, 60),
                  "INSPECT": (90, 180, 255), "RESUME": (120, 220, 120), "DONE": (200, 200, 200)}
 
 
