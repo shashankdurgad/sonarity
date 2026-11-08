@@ -94,7 +94,13 @@ def _score_views(contact, backend="proxy", range_m=visit.INSPECT_RANGE_M, yaws=N
     return scores, views
 
 
-def imagine_contact(contact, keep_out_m=None, robot_pose=None, out_dir=None, backend="proxy"):
+def _pose_clear(x, y, circles, margin=0.3):
+    """Same rule as sim.mission_logic.pose_clear: outside every keep-out circle (+ margin)."""
+    return all(np.hypot(x - c["xy"][0], y - c["xy"][1]) >= c["r"] + margin for c in circles)
+
+
+def imagine_contact(contact, keep_out_m=None, robot_pose=None, out_dir=None, backend="proxy",
+                    circles=()):
     """Live-mission entry point (LIVE_MISSION.md). Pick the side to inspect a contact from.
 
     contact:    contacts.json-style dict (id, xy, size_m, optional yaw). Never world.json.
@@ -102,6 +108,8 @@ def imagine_contact(contact, keep_out_m=None, robot_pose=None, out_dir=None, bac
                 contact, and imagination renders from that same distance.
     robot_pose: {x, y, yaw}; breaks near-ties in favour of the shorter move.
     out_dir:    run folder; if given, saves imagined/<cid>_<dir>_<hyp>.png for the video.
+    circles:    keep-out circles [{xy, r}]; sides whose pose falls inside one are skipped
+                (if every side is blocked, the best side is returned and the caller backs off).
 
     Returns the same dict as sim.mission_logic.choose_view_standin, plus "imagined":
       {"contact_id", "chosen", "scores", "pose": {x, y, yaw}, "reason", "imagined"}
@@ -111,8 +119,11 @@ def imagine_contact(contact, keep_out_m=None, robot_pose=None, out_dir=None, bac
     yaw_known = contact.get("yaw") is not None and contact.get("yaw_known", True)
     scores, views = _score_views(contact, backend, range_m, None if yaw_known else UNKNOWN_YAWS)
 
-    best = max(scores.values())
-    tied = [d for d in DIRECTIONS if scores[d] >= best - TIE_MARGIN]
+    open_sides = [d for d in DIRECTIONS
+                  if _pose_clear(*visit.sensor_pose(contact["xy"], d, range_m)[:2], circles)] or list(DIRECTIONS)
+    blocked = [d for d in DIRECTIONS if d not in open_sides]
+    best = max(scores[d] for d in open_sides)
+    tied = [d for d in open_sides if scores[d] >= best - TIE_MARGIN]
     if robot_pose is not None and len(tied) > 1:
         def dist(d):
             sx, sy, _ = visit.sensor_pose(contact["xy"], d, range_m)
@@ -120,7 +131,7 @@ def imagine_contact(contact, keep_out_m=None, robot_pose=None, out_dir=None, bac
         chosen = min(tied, key=dist)
         why_tie = f"; {', '.join(tied)} about equal, took the nearest"
     else:
-        chosen = max(scores, key=scores.get)
+        chosen = max(open_sides, key=scores.get)
         why_tie = ""
     sx, sy, heading = visit.sensor_pose(contact["xy"], chosen, range_m)
 
@@ -136,6 +147,8 @@ def imagine_contact(contact, keep_out_m=None, robot_pose=None, out_dir=None, bac
 
     reason = (f"imagined bomb vs rock from 4 sides at {range_m:.1f} m: {chosen} differs most "
               f"({scores[chosen]:.2f}){why_tie}")
+    if blocked:
+        reason += f"; {', '.join(blocked)} blocked by a keep-out zone"
     if not yaw_known:
         reason += "; heading unknown, averaged over 4 headings"
     return {"contact_id": cid, "chosen": chosen, "scores": scores,
