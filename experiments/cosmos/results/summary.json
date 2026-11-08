@@ -1,0 +1,15 @@
+{
+  "model": "nvidia/Cosmos3-Edge",
+  "gpu": "L40S",
+  "gen_s_per_video": 17,
+  "frames": 61,
+  "resolution": "832x480",
+  "bomb_vs_rock_difference": {
+    "side_on": 0.0276,
+    "end_on": 0.0181
+  },
+  "zero_shot_choice": "side_on",
+  "on_board_model_predicts": "side_on",
+  "caveat": "In the bomb end-on video the bomb is not visible in the final frame (hidden or not generated), so the end-on comparison is weak.",
+  "note": "Run 1: camera was asked to circle round the object; Cosmos ignored that and drove straight in, so side_on and end_on are not different viewpoints. Kept for the side-on bomb/rock frames only."
+}

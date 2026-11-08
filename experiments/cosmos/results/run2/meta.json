@@ -1,0 +1,22 @@
+{
+  "model": "nvidia/Cosmos3-Edge",
+  "gpu": "L40S",
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "load_s": 6.7,
+  "guardrail": false,
+  "gen_s": {
+    "bomb_side_on_s0": 18.7,
+    "bomb_end_on_s0": 16.3,
+    "rock_s0": 16.3,
+    "bomb_side_on_s1": 16.4,
+    "bomb_end_on_s1": 16.5,
+    "rock_s1": 16.4,
+    "bomb_side_on_s2": 16.5,
+    "bomb_end_on_s2": 16.5,
+    "rock_s2": 16.7
+  }
+}

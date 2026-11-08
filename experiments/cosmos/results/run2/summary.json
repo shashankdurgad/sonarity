@@ -1,0 +1,42 @@
+{
+  "model": "nvidia/Cosmos3-Edge",
+  "gpu": "L40S",
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "load_s": 6.7,
+  "guardrail": false,
+  "gen_s": {
+    "bomb_side_on_s0": 18.7,
+    "bomb_end_on_s0": 16.3,
+    "rock_s0": 16.3,
+    "bomb_side_on_s1": 16.4,
+    "bomb_end_on_s1": 16.5,
+    "rock_s1": 16.4,
+    "bomb_side_on_s2": 16.5,
+    "bomb_end_on_s2": 16.5,
+    "rock_s2": 16.7
+  },
+  "bomb_vs_rock_difference_per_seed": {
+    "side_on": [
+      0.018,
+      0.0395,
+      0.0141
+    ],
+    "end_on": [
+      0.0215,
+      0.0429,
+      0.0417
+    ]
+  },
+  "mean": {
+    "side_on": 0.0239,
+    "end_on": 0.0354
+  },
+  "side_on_wins": "0/3 seeds",
+  "zero_shot_choice": "end_on",
+  "on_board_model_predicts": "side_on",
+  "verdict": "INVALID comparison: the requested object is missing from the final frame in 8 of 9 videos (no bomb in any bomb video; a faint rock only in rock seed 0), so the scores measure background differences, not bomb vs rock. Zero-shot Cosmos3-Edge did not reliably place the object or its pose."
+}
