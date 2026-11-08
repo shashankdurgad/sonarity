@@ -152,14 +152,15 @@ def handle_event(ev):
                               "yaw": round(yaw, 3), "burial": burial})
         except ValueError as e:
             return f"event ignored: {e}"
-        what = "seabed scour uncovers a bomb" if kind == "uncover_bomb" else f"a {cls} appears"
+        what = "seabed scour uncovers a bomb" if kind == "uncover_bomb" else f"an object ({cls}) appears"
+        # render/timeline.py keys on "bomb" / "object" / "visibility drops" / "visibility" in these captions
         return f"ENVIRONMENT CHANGE (robot not told): {what} on the route ahead"
     if kind == "murk_on":
         sim.apply_change({"type": "set_murk", "level": float(ev.get("level", 0.75))})
         return "ENVIRONMENT CHANGE (robot not told): visibility drops"
     if kind == "murk_off":
         sim.apply_change({"type": "set_murk", "level": 0.0})
-        return "ENVIRONMENT CHANGE: water clears"
+        return "ENVIRONMENT CHANGE: visibility returns"
     return f"unknown event {kind}"
 
 

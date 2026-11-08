@@ -1,6 +1,6 @@
 # Live mission: the robot reacts while it runs
 
-## Status / handoff (P2, Sun 8 Nov 02:10; P2 is asleep, reachable in the morning)
+## Status / handoff (P2, Sun 8 Nov 02:10, checked 03:10; P2 is asleep, reachable in the morning)
 
 **Working on `main` (d102e5a):** the full live loop with real YOLO (P1), imagination (P5) and Gemini classify (P4/P1), on P3's merged scene. Mission events are human-triggered and safe to press at any moment.
 
@@ -26,6 +26,7 @@ If the robot is holding, inspecting or re-routing when you press it, the bomb wa
 - **P1 (detector):** (1) Low objects are seen late: in `full_murky_s4` a tyre wasn't detected until 3.8 m, so the robot had to back off. (2) Aerial bombs are still sometimes classed `other`. The mission holds for any contact near the route, so this is safe, but it affects verdicts. (3) YOLO sometimes draws two overlapping boxes on one object. (4) Check for a blind spot in OceanSim's centre streak (dead ahead).
 - **P4 (classify):** verdicts across the 3 runs were mixed. A buried bomb was called non-UXO, two rocks were called UXO, and an uncovered bomb was called uncertain twice. The "murk makes the camera unusable, so say `uncertain`" logic isn't implemented yet: murk only degrades the camera.
 - **P5 (video):** the runs above give footage for all 3 scenarios. The camera panel now shows the contact during inspections (`inspections/*_cam.png`, and `cam/` frames at the inspection pose).
+- **P1 (beauty render, 03:10 check by P2):** `render/timeline.py` classifies events by keywords in the log's `event` caption. The `drop_object` caption ("a rock appears") and `murk_off` caption ("water clears") didn't match, so dropped objects would never be revealed and the water would never clear in the RTX replay. Fixed on the sim side: the captions are now "an object (<cls>) appears" and "visibility returns". Runs recorded before this fix with `drop_object`/`murk_off` keep the old wording. The `full_*` runs only used `uncover_bomb` and `murk_on`, so they're unaffected. Mission captions are now kept matching your parser; please tell P2 if you change the keywords.
 - **P3:** pick the hero seed(s) for the final take. Seeds 1 (clear_sand), 2 (half_buried) and 4 (murky) are known to work end to end.
 
 ---
