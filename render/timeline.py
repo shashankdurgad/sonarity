@@ -174,26 +174,9 @@ class Timeline:
         return m.group(1) if m and m.group(1) in self.contact_xy else None
 
     def _shot(self, f):
-        s = self.entry(f)
-        step = self.step_of(f)
-        if f >= self.n_mission_frames:
-            return "outro", None
-        for ev in self.events:
-            if ev["kind"] in ("bomb", "drop") and "object" in ev:
-                f0 = ev["step"] * self.F
-                if f0 <= f < f0 + REVEAL_S * FPS:
-                    return "reveal", ev["object"]
-        if step < INTRO_STEPS:
-            return "intro", None
-        st = s["state"]
-        cid = self._contact_in_banner(s)
-        if st in ("HOLD", "BACKOFF") and cid:
-            return "orbit", cid
-        if st == "REPLAN":
-            return "top", cid
-        if st == "INSPECT" and cid:
-            return ("side", cid) if (s.get("banner") or "").startswith("inspecting") else ("high", cid)
-        return "chase", None
+        # One consistent chase view for the whole mission (cutting between angles confused viewers),
+        # then a single crane-up over the site once the mission is complete.
+        return ("outro", None) if f >= self.n_mission_frames else ("chase", None)
 
     def _camera_track(self):
         n = self.n_frames
@@ -202,6 +185,9 @@ class Timeline:
         fov = np.zeros(n)
         shots = []
         shot_start = {}
+        # One fixed viewing direction for the whole mission (looking north, like the minimap): the camera
+        # tracks the robot's position but never rotates, so lane turns and inspections don't spin the view.
+        FOLLOW = np.array([0.0, -9.0, 6.0])
         prev_shot = None
         orbit_a0 = 0.0
         for f in range(n):
@@ -224,8 +210,9 @@ class Timeline:
                 tg = r + np.array([0, 0, -0.2])
                 fv = 42
             elif shot == "chase":
-                c = r - fwd * 6.0 + left * 2.2 + up * 1.9
-                tg = r + fwd * 3.0 - up * 0.9
+                c = r + FOLLOW
+                tg = r + np.array([0.0, 2.0, -1.2])
+                fv = 52
             elif shot == "high":
                 c = r - fwd * 7.0 + left * 3.0 + up * 4.5
                 tg = r + fwd * 2.0 - up * 1.5
@@ -270,7 +257,7 @@ class Timeline:
             else:  # outro: crane up over the site
                 k = min(t / OUTRO_S, 1.0)
                 k = k * k * (3 - 2 * k)
-                c0 = r - fwd * 6.0 + left * 2.2 + up * 1.9
+                c0 = r + FOLLOW
                 c1 = self.centre + np.array([0.0, -(self.bounds[3] - self.bounds[2]) * 0.55, 30.0])
                 c = c0 + (c1 - c0) * k
                 tg = r + (self.centre - r) * k
