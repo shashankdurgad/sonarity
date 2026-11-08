@@ -1,8 +1,8 @@
-# Look Before You Dive
+# Sonarity
 
-**An autonomous underwater survey robot that finds unexploded ordnance (UXO), keeps its distance, and *imagines* before it looks closer.**
+**An autonomous underwater survey robot that finds unexploded ordnance (UXO), keeps its distance, and *looks before it dives*: it imagines what it might be seeing before it moves closer.**
 
-**Team Sonarity**: Aditya Menon, Magizh Shankar, Shashank Durgad, Ibaad Muhammad, Samaira Khan.
+**Team:** Aditya Menon, Magizh Shankar, Shashank Durgad, Ibaad Muhammad, Samaira Khan.
 
 Agentverse 2026, Robotics track. Everything here is **simulated**: NVIDIA Isaac Sim 6.0.1 + [OceanSim](https://github.com/umfieldrobotics/OceanSim) (forward-looking sonar and camera), run on Modal GPUs.
 
