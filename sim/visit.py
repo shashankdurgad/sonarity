@@ -188,11 +188,11 @@ def _box_blur(a, ky, kx):
     return out
 
 
-def sensor_pose(contact_xy, direction):
+def sensor_pose(contact_xy, direction, range_m=INSPECT_RANGE_M):
     """Sensor x, y and heading (rad) for viewing the contact from a compass direction."""
     dx, dy = DIRECTIONS[direction]
-    sx = contact_xy[0] + INSPECT_RANGE_M * dx
-    sy = contact_xy[1] + INSPECT_RANGE_M * dy
+    sx = contact_xy[0] + range_m * dx
+    sy = contact_xy[1] + range_m * dy
     return sx, sy, float(np.arctan2(-dy, -dx))
 
 
@@ -278,10 +278,10 @@ def real_scene(run_dir, contact, seed=0):
     return scene
 
 
-def render_view(scene, contact_xy, direction, backend="proxy"):
-    """Noise-free polar sonar view of `scene` from `direction`."""
+def render_view(scene, contact_xy, direction, backend="proxy", range_m=INSPECT_RANGE_M):
+    """Noise-free polar sonar view of `scene` from `direction`, `range_m` from the contact."""
     if backend != "proxy":
         raise NotImplementedError(
-            f"backend {backend!r} not wired up yet; OceanSim lands after P2's image passes step 3")
-    sx, sy, heading = sensor_pose(contact_xy, direction)
+            f"backend {backend!r} not wired up yet; only the NumPy proxy is implemented")
+    sx, sy, heading = sensor_pose(contact_xy, direction, range_m)
     return render_polar(scene, sx, sy, heading)
