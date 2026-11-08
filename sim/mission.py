@@ -105,17 +105,23 @@ def next_obj_id():
     return f"o{max(int(o['id'][1:]) for o in sim.world['objects']) + 1}"
 
 
-def point_ahead(dist_lo=11.0, dist_hi=13.0):
-    """A point on the robot's remaining SURVEY route, 11-13 m ahead (placed by the environment, not the robot)."""
+def point_ahead(dist_lo=11.0, dist_hi=13.0, min_straight=9.0):
+    """A point on the robot's remaining SURVEY route (inspection detours ignored), 11-13 m along it and at
+    least `min_straight` m from the robot in a straight line: inside sonar range (~9.7 m) but well beyond
+    its ~3 m near blind zone, so the robot can genuinely detect it as it approaches. Placed by the
+    environment, not the robot. None if there isn't enough survey route left."""
     target = random.uniform(dist_lo, dist_hi)
-    acc, prev = 0.0, (pose["x"], pose["y"])
+    acc, prev = 0.0, None
     for it in queue:
+        if it["state"] != "SURVEY":
+            continue
         q = it["pose"]
-        acc += math.dist(prev, (q["x"], q["y"]))
+        if prev is not None:
+            acc += math.dist(prev, (q["x"], q["y"]))
         prev = (q["x"], q["y"])
-        if acc >= target:
+        if acc >= target and math.dist((q["x"], q["y"]), (pose["x"], pose["y"])) >= min_straight:
             return q
-    return None  # not enough route left ahead
+    return None
 
 
 def handle_event(ev):
@@ -123,14 +129,22 @@ def handle_event(ev):
     kind = ev.get("type")
     if kind in ("uncover_bomb", "drop_object"):
         cls = "aerial_bomb" if kind == "uncover_bomb" else ev.get("cls", "aerial_bomb")
-        q = point_ahead()
-        if q is None:
-            return "event skipped: less than ~13 m of route left ahead of the robot"
         # 1-1.6 m off the centreline (well inside the 4 m keep-out, so the route must change) and angled
         # 35-85 deg across the route: end-on bombs give almost no echo and dead-ahead sits in OceanSim's
-        # centre streak. Timing and exact spot stay random; a person triggers it.
-        lat = random.choice((-1, 1)) * random.uniform(1.0, 1.6)
-        x, y = q["x"] - lat * math.sin(q["yaw"]), q["y"] + lat * math.cos(q["yaw"])
+        # centre streak. Never inside or next to an existing keep-out zone. Timing stays with the person.
+        spot = None
+        for _ in range(12):
+            q = point_ahead()
+            if q is None:
+                return "event skipped: not enough survey route left ahead of the robot"
+            lat = random.choice((-1, 1)) * random.uniform(1.0, 1.6)
+            x, y = q["x"] - lat * math.sin(q["yaw"]), q["y"] + lat * math.cos(q["yaw"])
+            if all(math.dist((x, y), cc["xy"]) >= cc["r"] + 1.5 for cc in circles):
+                spot = (x, y, q)
+                break
+        if spot is None:
+            return "event skipped: no spot ahead that is clear of existing keep-out zones"
+        x, y, q = spot
         yaw = q["yaw"] + random.choice((-1, 1)) * random.uniform(0.6, 1.5)
         burial = 0.2 if kind == "uncover_bomb" else 0.0
         try:
@@ -212,9 +226,17 @@ def plan_inspection(c, here, hold_steps=6, prefix="CONTACT"):
     k = next((i for i, q in enumerate(new_rest) if math.dist((q["x"], q["y"]), c["xy"]) <= near_r), 0)
     backoff = []
     if not ml.pose_clear(here, circles, margin=0.0):
-        # Confirmed too late: retrace the driven path until clear of every keep-out zone.
-        for q in reversed(driven):
-            backoff.append({"x": q["x"], "y": q["y"], "yaw": q["yaw"]})
+        # Confirmed late, already inside a zone: move straight AWAY from the contact (retracing the driven
+        # path can run back over it), stepping until clear of every zone.
+        dx, dy = here["x"] - c["xy"][0], here["y"] - c["xy"][1]
+        n = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / n, dy / n
+        away_yaw = math.atan2(-uy, -ux)  # keep facing the contact while reversing
+        dist = n
+        while dist < ml.KEEP_OUT_M + 3.0:
+            dist += ml.STEP_M
+            q = {"x": c["xy"][0] + ux * dist, "y": c["xy"][1] + uy * dist, "yaw": away_yaw}
+            backoff.append(q)
             if ml.pose_clear(q, circles, margin=0.3):
                 break
     start = backoff[-1] if backoff else here
@@ -278,12 +300,23 @@ def preview(i, sonar, chase, dets, it, path_now):
 
 step = 0
 pose = queue[0]["pose"]
+deferred = []  # object events received while the robot was stopped / inspecting / re-routing
+last_state = "SURVEY"
 while queue and step < args.max_steps:
     for ev in read_events() + ([auto.pop(step)] if step in auto else []):
+        if ev.get("type") in ("uncover_bomb", "drop_object") and last_state != "SURVEY":
+            deferred.append(ev)  # fire once the robot is back on its survey route
+            caption, caption_until = "Event received: it will fire when the robot resumes its survey", step + 8
+            print(f"[mission] step {step}: deferred {ev['type']} (robot is {last_state})", flush=True)
+            continue
         caption, caption_until = handle_event(ev), step + 30
         print(f"[mission] step {step}: {caption}", flush=True)
+    if deferred and last_state == "SURVEY":
+        caption, caption_until = handle_event(deferred.pop(0)), step + 30
+        print(f"[mission] step {step}: (deferred) {caption}", flush=True)
     it = queue.popleft()
     pose = it["pose"]
+    last_state = it["state"]
     look = None
     if it.get("view"):  # at the inspection pose: point the camera at the contact
         lc = next((x for x in tracker.confirmed() if x["id"] == it["contact"]), None)
