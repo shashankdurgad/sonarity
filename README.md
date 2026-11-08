@@ -2,6 +2,8 @@
 
 **An autonomous underwater survey robot that finds unexploded ordnance (UXO), keeps its distance, and *imagines* before it looks closer.**
 
+**Team Sonarity**: Aditya Menon, Magizh Shankar, Shashank Durgad, Ibaad Muhammad, Samaira Khan.
+
 Agentverse 2026, Robotics track. Everything here is **simulated**: NVIDIA Isaac Sim 6.0.1 + [OceanSim](https://github.com/umfieldrobotics/OceanSim) (forward-looking sonar and camera), run on Modal GPUs.
 
 ## The problem
@@ -58,9 +60,11 @@ A bomb is long and thin and casts a long straight sonar shadow; a rock is round.
 
 ## Running it
 
-Requirements: Python 3.10+, `numpy`, `Pillow`, `opencv-python` (or `ffmpeg`) for the local parts; a Modal account with an NGC secret for the simulator (see `infra/image.py`); `GEMINI_API_KEY` for Gemini verdicts (optional).
+Requirements: Python 3.10+ and `pip install -r requirements.txt` for the local parts; a Modal account with an NGC secret for the simulator (see `infra/image.py`); `GEMINI_API_KEY` for Gemini verdicts (optional).
 
 ```bash
+pip install -r requirements.txt
+
 # Smoke tests + batch pipeline on the sample run (no GPU)
 python tests/test_smoke.py
 python run_demo.py runs/sample --no-gemini
@@ -86,4 +90,4 @@ Run folders follow the contract in `PLAN.md` §11: `mission_log.jsonl`, `sonar/`
 
 ## Credits
 
-Built by a team of five at Agentverse 2026. OceanSim by the University of Michigan Field Robotics Group; NVIDIA Isaac Sim; Ultralytics YOLOv8; Google Gemini; NVIDIA Cosmos 3 Edge (experiment). Marine-life models in the beauty render are CC BY (see the credits file in the render assets).
+Built by **Team Sonarity** (Aditya Menon, Magizh Shankar, Shashank Durgad, Ibaad Muhammad, Samaira Khan) at Agentverse 2026. OceanSim by the University of Michigan Field Robotics Group; NVIDIA Isaac Sim; Ultralytics YOLOv8; Google Gemini; NVIDIA Cosmos 3 Edge (experiment). Marine-life models in the beauty render are CC BY (see the credits file in the render assets).
