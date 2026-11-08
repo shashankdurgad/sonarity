@@ -288,8 +288,11 @@ while queue and step < args.max_steps:
     if it.get("view"):  # at the inspection pose: point the camera at the contact
         lc = next((x for x in tracker.confirmed() if x["id"] == it["contact"]), None)
         look = tuple(lc["xy"]) if lc else None
+    timing = {}
+    _t = time.time()
     sim.move_to(pose["x"], pose["y"], pose["yaw"], cam_look_at=look)
     sonar, cam = sim.observe()
+    timing["sense_sim_s"] = round(time.time() - _t, 3)  # simulator render (stands in for the real sensors)
     chase = sim.chase()
     name = f"{step:06d}"
     Image.fromarray(sonar, mode="L").save(os.path.join(out, "sonar", f"{name}.png"))
@@ -301,7 +304,9 @@ while queue and step < args.max_steps:
     driven.append(pose)
 
     try:
+        _t = time.time()
         dets = detect_frame(sonar, pose) if sonar.max() > 0 else []
+        timing["detect_s"] = round(time.time() - _t, 3)
     except Exception as e:  # service down or slow: keep the robot going on the stand-in
         print(f"[mission] detector failed ({e!r}); stand-in this frame", flush=True)
         dets = ml.detect_frame_standin(sonar, pose)
@@ -317,7 +322,9 @@ while queue and step < args.max_steps:
         Image.fromarray(cam).save(os.path.join(out, ip[:-4] + "_cam.png"))  # camera aimed at the contact
         if classify_contact is not None:
             try:
+                _t = time.time()
                 tgt = classify_contact(c, os.path.join(out, ip), view)
+                timing["classify_s"] = round(time.time() - _t, 3)
             except Exception as e:  # never let the planner stop the robot
                 print(f"[mission] classify_contact failed ({e}); using stand-in", flush=True)
                 tgt = ml.classify_standin(c, sonar)
@@ -341,7 +348,9 @@ while queue and step < args.max_steps:
             # Any contact near the route is a hazard until inspected: YOLO sometimes labels a real mine
             # "other" (m2yolo seed 3: the uncovered bomb was c2 "other" and the robot passed 0.68 m from it).
             if clearance < ml.KEEP_OUT_M + ml.CLEARANCE_M:
+                _t = time.time()
                 decision = "HOLD: " + plan_inspection(c, pose)
+                timing["plan_s"] = round(time.time() - _t, 3)  # imagine_contact + A* re-plan
                 break
             circles.append({"id": c["id"], "xy": c["xy"], "r": ml.KEEP_OUT_M})
             decision = f"{c['id']} logged, {clearance:.1f} m from route: no route change needed"
@@ -351,7 +360,9 @@ while queue and step < args.max_steps:
             and not any(q.get("capture") for q in queue)):
         c = reinspect.pop(0)
         if c["id"] not in {t["contact_id"] for t in targets}:
+            _t = time.time()
             decision = "RE-INSPECT: " + plan_inspection(c, pose, hold_steps=2, prefix="RETURNING TO")
+            timing["plan_s"] = round(time.time() - _t, 3)
 
     path_now = [it2["pose"] for it2 in queue]
     preview(step, sonar, chase, dets, it, path_now)
@@ -359,7 +370,7 @@ while queue and step < args.max_steps:
         "step": step, "pose": pose, "state": it["state"], "banner": it["banner"],
         "event": caption if step <= caption_until else "", "dets": [{k: d[k] for k in ("xy", "cls", "conf")} for d in dets],
         "contacts": [{k: c[k] for k in ("id", "xy", "cls", "conf", "hits")} for c in tracker.confirmed()],
-        "keep_out": circles, "decision": decision,
+        "keep_out": circles, "decision": decision, "timing": timing,
         "planned_path": [[round(q["x"], 2), round(q["y"], 2)] for q in path_now[::4]],
     }) + "\n")
     if decision:
@@ -400,6 +411,17 @@ with open(os.path.join(out, "poses.csv"), "w", newline="") as f:
 subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-framerate", "8", "-i", os.path.join(out, "_preview", "%06d.png"),
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", os.path.join(out, "mission.mp4")], check=False)
 subprocess.run(["rm", "-rf", os.path.join(out, "_preview")], check=False)
+def _stats(key):
+    v = sorted(json.loads(l)["timing"][key] for l in open(os.path.join(out, "mission_log.jsonl"))
+               if key in json.loads(l).get("timing", {}))
+    return {"n": len(v), "median_s": v[len(v) // 2], "max_s": v[-1]} if v else None
+
+
+timing_summary = {k: _stats(k) for k in ("sense_sim_s", "detect_s", "plan_s", "classify_s")}
+timing_summary["detector"] = DETECTOR
+with open(os.path.join(out, "timing.json"), "w") as f:
+    json.dump(timing_summary, f, indent=2)
+print(f"[mission] timing {timing_summary}", flush=True)
 print(f"[mission] DONE {step} steps, {len(contacts)} contacts, {len(circles)} keep-out zones, "
       f"{len(viewpoints)} inspections, total {time.time() - t0:.0f}s", flush=True)
 sim.close()

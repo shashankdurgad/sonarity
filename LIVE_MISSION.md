@@ -111,3 +111,16 @@ Tested on seeds 3, 5 and 7 (2–3 lanes, bomb uncovered plus murk, both triggere
 - Murk only degrades the camera. Nothing reacts to it yet; P4's "camera unusable, so mark contacts `uncertain`" logic should do that.
 
 **Plug-in points in `sim/mission.py`:** `perception.detect.detect_frame` (used when `ultralytics` imports inside Isaac), `agent.planner.classify_contact(contact, inspection_png_path, view)` (wrapped in try/except, with the stand-in as fallback), and `ml.choose_view_standin`, which P5's `imagine_contact` replaces. Any inspection pose it picks must pass `ml.pose_clear(pose, circles)`.
+
+## Measured timing (for the technical summary and the 15% edge-budget criterion)
+
+Every mission writes `runs/<id>/timing.json`, and `mission_log.jsonl` has a `timing` field per step. Numbers below are from run `timing_clear_sand_s3` (seed 3, 2 lanes, bomb uncovered, real YOLO), 165 steps:
+
+| Stage | Runs on | Median | Worst |
+|---|---|---|---|
+| Sonar + camera render | Isaac Sim / OceanSim on a Modal L40S (stands in for the real sensors) | 0.16 s | about 99 s on the first frame only (GPU kernel compile) |
+| Detection (YOLOv8n) | `uxo-detector` Modal service, GPU (P1) | 0.09 s | 0.29 s |
+| Imagine + A* re-plan | On the robot: NumPy, CPU (P5 + P2) | 1.0 s | 1.0 s |
+| Classify | On the robot: template rule (P4). Gemini isn't available in the sim container | < 1 ms | |
+
+The robot holds position while it imagines and classifies, so none of this is on the critical path for safety. Detection is: about 0.1 s per frame against a 0.75 m step.
