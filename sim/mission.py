@@ -34,6 +34,8 @@ parser.add_argument("--events-file", default="")
 parser.add_argument("--status-file", default="")
 parser.add_argument("--auto-event", action="append", default=[], help="NAME@STEP, e.g. uncover_bomb@60")
 parser.add_argument("--max-steps", type=int, default=2000)
+parser.add_argument("--no-revisit", action="store_true", help="don't go back to contacts classed uncertain")
+parser.add_argument("--force-uncertain", action="store_true", help="TEST ONLY: treat every first look as uncertain")
 args, _ = parser.parse_known_args()
 
 from sim.session import SimSession, seabed_bounds_for  # noqa: E402
@@ -181,35 +183,72 @@ def remaining_survey():
     return [it["pose"] for it in queue if it["state"] in ("SURVEY", "RESUME")]
 
 
-def choose_view(c, here):
-    """P5's imagine_contact picks the side; any side inside ANOTHER keep-out zone is rejected and the
-    next-best clear side (by P5's scores) is used. Falls back to the stand-in if imagine fails."""
+def choose_view(c, here, exclude=()):
+    """P5's imagine_contact picks the side; any side inside ANOTHER keep-out zone (or in `exclude`, the
+    sides already tried) is rejected and the next-best clear side (by P5's scores) is used. Falls back to
+    the stand-in if imagine fails. Returns None if every allowed side is blocked (only with `exclude`)."""
     if imagine_contact is not None:
         try:
             v = imagine_contact(c, keep_out_m=ml.KEEP_OUT_M, robot_pose=here, out_dir=out)
-            if ml.pose_clear(v["pose"], circles):
+            if v["chosen"] not in exclude and ml.pose_clear(v["pose"], circles):
                 return v
             from sim import visit
             rng = math.dist((v["pose"]["x"], v["pose"]["y"]), c["xy"])
             for d in sorted(v["scores"], key=v["scores"].get, reverse=True):
+                if d in exclude:
+                    continue
                 sx, sy, hd = visit.sensor_pose(c["xy"], d, rng)
                 cand = {"x": sx, "y": sy, "yaw": hd}
                 if ml.pose_clear(cand, circles):
+                    why = "already viewed" if v["chosen"] in exclude else "inside another keep-out zone"
                     return {**v, "chosen": d, "pose": cand,
-                            "reason": v["reason"] + f"; {v['chosen']} side is inside another keep-out zone, using {d}"}
+                            "reason": v["reason"] + f"; {v['chosen']} side {why}, using {d}"}
+            if exclude:
+                return None
         except Exception as e:  # never let imagination stop the robot
             print(f"[mission] imagine_contact failed ({e}); using stand-in", flush=True)
-    return ml.choose_view_standin(c, here, circles=circles)
+    v = ml.choose_view_standin(c, here, circles=circles)
+    if v["chosen"] in exclude:
+        ok = {d: sc for d, sc in v["scores"].items() if d not in exclude and sc > 0}
+        if not ok:
+            return None
+        d = max(ok, key=ok.get)
+        v = {**v, "chosen": d, "pose": ml.inspection_pose(c["xy"], d), "reason": "stand-in: nearest unviewed side"}
+    return v
 
 
 reinspect = []  # contacts whose inspection was interrupted by a newer, closer contact
+revisit = []  # {"contact", "side"}: classed uncertain on the first look; look again from another side at the end
+
+
+def plan_revisit(r, here):
+    """End of survey: go back to a contact classed uncertain and inspect it from a side not yet tried.
+    Returns the decision text, or None if no other side is clear / reachable."""
+    c, first = r["contact"], r["side"]
+    view = choose_view(c, here, exclude={first})
+    if view is None or not ml.pose_clear(view["pose"], circles):
+        return None
+    insp = view["pose"]
+    path = ml.route(here, insp, circles)
+    if not path and math.dist((here["x"], here["y"]), (insp["x"], insp["y"])) > 0.5:
+        return None
+    why = f"{c['id']} was uncertain from the {first}: looking again from the {view['chosen']}"
+    for _ in range(3):
+        queue.append(item(here, "REPLAN", f"survey done. Revisiting {why}", contact=c["id"]))
+    for q in path:
+        queue.append(item(q, "INSPECT", f"moving to re-inspect {c['id']} from the {view['chosen']}", contact=c["id"]))
+    for n in range(4):
+        queue.append(item(insp, "INSPECT", f"re-inspecting {c['id']} from the {view['chosen']}", contact=c["id"],
+                          capture=(n == 3), view=view, revisit=first))
+    return why
 
 
 def plan_inspection(c, here, hold_steps=6, prefix="CONTACT"):
     """Hold, add a keep-out circle, re-plan the rest of the survey around it, inspect from outside, resume."""
     old = remaining_survey()
     clearance = ml.min_clearance(old, c["xy"])
-    circles.append({"id": c["id"], "xy": c["xy"], "r": ml.KEEP_OUT_M})
+    if all(cc["id"] != c["id"] for cc in circles):  # a re-inspection already has its circle
+        circles.append({"id": c["id"], "xy": c["xy"], "r": ml.KEEP_OUT_M})
     old_paths.append([here] + old)
     new_rest = ml.detour(old, circles)
     view = choose_view(c, here)
@@ -256,6 +295,10 @@ def plan_inspection(c, here, hold_steps=6, prefix="CONTACT"):
             prev = next((x for x in tracker.confirmed() if x["id"] == it_["contact"]), None)
             if prev is not None and all(prev["id"] != r["id"] for r in reinspect):
                 reinspect.append(prev)
+        if it_.get("capture") and it_.get("revisit") and it_["contact"] != c["id"]:  # interrupted revisit
+            prev = next((x for x in tracker.confirmed() if x["id"] == it_["contact"]), None)
+            if prev is not None and all(prev["id"] != r["contact"]["id"] for r in revisit):
+                revisit.insert(0, {"contact": prev, "side": it_["revisit"]})
     queue.clear()
     # Already inside the zone (contact confirmed late): retreat FIRST, then hold outside it.
     for q in backoff:
@@ -270,7 +313,7 @@ def plan_inspection(c, here, hold_steps=6, prefix="CONTACT"):
         for n in range(4):
             queue.append(item(insp, "INSPECT", f"inspecting {c['id']} from the {view['chosen']}", contact=c["id"],
                               capture=(n == 3), view=view))
-    if not new_rest:
+    if not new_rest and old:  # no survey left at all is fine: the mission just ends (or revisits)
         for _ in range(4):
             queue.append(item(insp or start, "HOLD", f"no safe route onward past {c['id']}: holding for operator"))
     for q in back:
@@ -364,10 +407,31 @@ while queue and step < args.max_steps:
                 tgt = ml.classify_standin(c, sonar)
         else:
             tgt = ml.classify_standin(c, sonar)
-        targets.append(tgt)
-        viewpoints.append({"contact_id": c["id"], "chosen": view["chosen"], "scores": view["scores"],
-                           "imagined": view.get("imagined", {}), "inspection": ip, "reason": view.get("reason", "")})
-        decision = f"verdict {c['id']}: {tgt['class']} ({tgt['reason']})"
+        if it.get("revisit"):  # second look: replace the verdict, keep the first one alongside
+            first_side = it["revisit"]
+            i_old = next(i for i, t in enumerate(targets) if t["contact_id"] == c["id"])
+            first = targets[i_old]
+            tgt = {**tgt, "revisited": True,
+                   "first_look": {**{k: first.get(k) for k in ("class", "confidence", "reason")}, "side": first_side}}
+            if tgt["class"] == "uncertain":
+                tgt["reason"] = (tgt["reason"] + f" Still uncertain after views from the {first_side} and the "
+                                 f"{view['chosen']}: flag for diver / ROV confirmation.")
+            targets[i_old] = tgt
+            vp = next(v for v in viewpoints if v["contact_id"] == c["id"])
+            vp["revisit"] = {"chosen": view["chosen"], "scores": view["scores"], "inspection": ip,
+                             "reason": view.get("reason", "")}
+            # "revisit verdict ..." (not "verdict ...") so tools keyed on the first verdict line still work
+            decision = (f"revisit verdict {c['id']}: {tgt['class']} (was uncertain from the {first_side}; "
+                        f"{tgt['reason']})")
+        else:
+            if args.force_uncertain:  # TEST ONLY: exercise the revisit path
+                tgt = {**tgt, "class": "uncertain", "reason": "[test: forced uncertain] " + tgt["reason"]}
+            targets.append(tgt)
+            viewpoints.append({"contact_id": c["id"], "chosen": view["chosen"], "scores": view["scores"],
+                               "imagined": view.get("imagined", {}), "inspection": ip, "reason": view.get("reason", "")})
+            decision = f"verdict {c['id']}: {tgt['class']} ({tgt['reason']})"
+            if tgt["class"] == "uncertain" and not args.no_revisit:
+                revisit.append({"contact": c, "side": view["chosen"]})
 
     # Safety rule: act on a new contact in ANY moving state (a contact seen while resuming or transiting
     # to an inspection must still stop the robot). Only HOLD/REPLAN/BACKOFF defer it (robot not advancing).
@@ -397,6 +461,17 @@ while queue and step < args.max_steps:
             _t = time.time()
             decision = "RE-INSPECT: " + plan_inspection(c, pose, hold_steps=2, prefix="RETURNING TO")
             timing["plan_s"] = round(time.time() - _t, 3)
+
+    # Survey finished: go back to contacts classed uncertain and look from another side.
+    while not queue and revisit:  # (also right after a verdict: the last queued step may be a capture)
+        r = revisit.pop(0)
+        why = plan_revisit(r, pose)
+        if why:
+            decision = (decision + " | " if decision else "") + "REVISIT: " + why
+        else:
+            t = next(t for t in targets if t["contact_id"] == r["contact"]["id"])
+            t["reason"] += " No other clear, reachable side to revisit from: flag for diver / ROV confirmation."
+            print(f"[mission] step {step}: no revisit possible for {r['contact']['id']}", flush=True)
 
     path_now = [it2["pose"] for it2 in queue]
     preview(step, sonar, chase, dets, it, path_now)
