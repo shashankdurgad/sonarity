@@ -12,6 +12,11 @@ For each contact in contacts.json:
 Uses ONLY the contact's xy, yaw and size_m for imagining. Never reads world.json.
 
 Writes imagined/*.png, inspections/*.png and viewpoints.json (PLAN.md §11).
+
+Two entry points:
+  run(run_dir)               - batch pipeline (run_demo.py): imagine + render the inspection.
+  imagine_contact(contact,…) - live mission (sim/mission.py): imagine and return the pose to
+                               drive to; the mission loop takes the real OceanSim inspection.
 """
 
 from __future__ import annotations
@@ -54,28 +59,88 @@ def difference_score(sig_a, sig_b) -> float:
     return 1.0 - float(np.exp(-diff / SCORE_SCALE))
 
 
-def imagine_contact(contact, backend="proxy"):
-    """Return (scores, display views) for one contact, without touching ground truth."""
-    cid, xy = contact["id"], contact["xy"]
-    yaw = contact.get("yaw", 0.0)
-    rock_seed = _seed(cid, "rock")
+UNKNOWN_YAWS = [0.0, np.pi / 4, np.pi / 2, 3 * np.pi / 4]  # tried when the detector gives no heading
+INSPECT_MARGIN_M = 2.5  # inspection pose sits this far outside the keep-out circle (matches
+                        # sim/mission_logic.inspection_pose: INSPECT_EXTRA_M 1.5 + 1.0)
+TIE_MARGIN = 0.02       # scores this close count as a tie -> take the side nearest the robot
 
-    bomb_scenes = [visit.hypothesis_scene(contact, "aerial_bomb", yaw=yaw),
-                   # nose/tail can't be told apart from a detection: consider both
-                   visit.hypothesis_scene(contact, "aerial_bomb", yaw=yaw + np.pi)]
-    rock_scene = visit.hypothesis_scene(contact, "rock", yaw=yaw, seed=rock_seed)
+
+def _score_views(contact, backend="proxy", range_m=visit.INSPECT_RANGE_M, yaws=None):
+    """Imagine bomb vs rock from each side. Returns (scores, display views).
+
+    Uses only the contact's xy, size_m and yaw. If yaw is unknown, averages over `yaws`.
+    """
+    cid, xy = contact["id"], contact["xy"]
+    if yaws is None:
+        yaws = [contact.get("yaw", 0.0)]
+    # nose/tail can't be told apart from a detection: consider both for every heading
+    bomb_scenes = [visit.hypothesis_scene(contact, "aerial_bomb", yaw=y + flip)
+                   for y in yaws for flip in (0.0, np.pi)]
+    rock_scenes = [visit.hypothesis_scene(contact, "rock", yaw=y, seed=_seed(cid, "rock"))
+                   for y in yaws]
     empty = visit.hypothesis_scene(contact, None)
 
     scores, views = {}, {}
     for d in DIRECTIONS:
-        bg = visit.render_view(empty, xy, d, backend)
-        bombs = [visit.render_view(s, xy, d, backend) for s in bomb_scenes]
-        rock = visit.render_view(rock_scene, xy, d, backend)
-        sig_rock = _signature(rock, bg)
-        scores[d] = round(float(np.mean([difference_score(_signature(b, bg), sig_rock)
-                                         for b in bombs])), 3)
-        views[d] = {"bomb": bombs[0], "rock": rock}
+        bg = visit.render_view(empty, xy, d, backend, range_m)
+        bombs = [visit.render_view(s, xy, d, backend, range_m) for s in bomb_scenes]
+        rocks = [visit.render_view(s, xy, d, backend, range_m) for s in rock_scenes]
+        per_yaw = []
+        for k, rock in enumerate(rocks):
+            sig_rock = _signature(rock, bg)
+            per_yaw += [difference_score(_signature(b, bg), sig_rock) for b in bombs[2 * k:2 * k + 2]]
+        scores[d] = round(float(np.mean(per_yaw)), 3)
+        views[d] = {"bomb": bombs[0], "rock": rocks[0]}
     return scores, views
+
+
+def imagine_contact(contact, keep_out_m=None, robot_pose=None, out_dir=None, backend="proxy"):
+    """Live-mission entry point (LIVE_MISSION.md). Pick the side to inspect a contact from.
+
+    contact:    contacts.json-style dict (id, xy, size_m, optional yaw). Never world.json.
+    keep_out_m: keep-out radius; the inspection pose is placed keep_out_m + 2.5 m from the
+                contact, and imagination renders from that same distance.
+    robot_pose: {x, y, yaw}; breaks near-ties in favour of the shorter move.
+    out_dir:    run folder; if given, saves imagined/<cid>_<dir>_<hyp>.png for the video.
+
+    Returns the same dict as sim.mission_logic.choose_view_standin, plus "imagined":
+      {"contact_id", "chosen", "scores", "pose": {x, y, yaw}, "reason", "imagined"}
+    """
+    cid = contact["id"]
+    range_m = visit.INSPECT_RANGE_M if keep_out_m is None else keep_out_m + INSPECT_MARGIN_M
+    yaw_known = contact.get("yaw") is not None and contact.get("yaw_known", True)
+    scores, views = _score_views(contact, backend, range_m, None if yaw_known else UNKNOWN_YAWS)
+
+    best = max(scores.values())
+    tied = [d for d in DIRECTIONS if scores[d] >= best - TIE_MARGIN]
+    if robot_pose is not None and len(tied) > 1:
+        def dist(d):
+            sx, sy, _ = visit.sensor_pose(contact["xy"], d, range_m)
+            return np.hypot(sx - robot_pose["x"], sy - robot_pose["y"])
+        chosen = min(tied, key=dist)
+        why_tie = f"; {', '.join(tied)} about equal, took the nearest"
+    else:
+        chosen = max(scores, key=scores.get)
+        why_tie = ""
+    sx, sy, heading = visit.sensor_pose(contact["xy"], chosen, range_m)
+
+    imagined = {}
+    if out_dir:
+        os.makedirs(os.path.join(out_dir, "imagined"), exist_ok=True)
+        for d in DIRECTIONS:
+            imagined[d] = []
+            for hyp in HYPOTHESES:
+                rel = f"imagined/{cid}_{d}_{hyp}.png"
+                _save(views[d][hyp], os.path.join(out_dir, rel), _seed(cid, d, hyp))
+                imagined[d].append(rel)
+
+    reason = (f"imagined bomb vs rock from 4 sides at {range_m:.1f} m: {chosen} differs most "
+              f"({scores[chosen]:.2f}){why_tie}")
+    if not yaw_known:
+        reason += "; heading unknown, averaged over 4 headings"
+    return {"contact_id": cid, "chosen": chosen, "scores": scores,
+            "pose": {"x": round(float(sx), 3), "y": round(float(sy), 3), "yaw": round(heading, 4)},
+            "reason": reason, "imagined": imagined}
 
 
 def _save(polar, path, seed):
@@ -95,7 +160,7 @@ def run(run_dir: str, backend: str | None = None) -> list:
         cid = c["id"]
         if "yaw" not in c:
             print(f"[imagine] {cid}: no yaw in contacts.json, assuming 0", file=sys.stderr)
-        scores, views = imagine_contact(c, backend)
+        scores, views = _score_views(c, backend)
         chosen = max(scores, key=scores.get)
 
         imagined = {}
