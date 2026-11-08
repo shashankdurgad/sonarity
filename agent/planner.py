@@ -195,6 +195,25 @@ LIVE_FALLBACK = {
 }
 
 
+def _assess_visibility(cam_path: str) -> dict:
+    """Check if the camera image is usable. Returns visibility assessment."""
+    if not cam_path or not os.path.exists(cam_path):
+        return {"quality": "unavailable", "usable": False}
+    try:
+        from PIL import Image
+        import numpy as np
+        img = np.array(Image.open(cam_path).convert("L"))
+        mean_brightness = float(img.mean())
+        contrast = float(img.std())
+        if mean_brightness < 40 or contrast < 15:
+            return {"quality": "murky", "usable": False, "brightness": mean_brightness, "contrast": contrast}
+        if mean_brightness < 80 or contrast < 30:
+            return {"quality": "degraded", "usable": True, "brightness": mean_brightness, "contrast": contrast}
+        return {"quality": "clear", "usable": True, "brightness": mean_brightness, "contrast": contrast}
+    except Exception:
+        return {"quality": "unavailable", "usable": False}
+
+
 def _inspection_images(contact: dict, inspection_path: str) -> list:
     """Camera view (inspections/<id>_<dir>_cam.png, written next to the sonar inspection),
     the sonar inspection frame, and the contact's sonar crop (path relative to the run dir)."""
@@ -213,32 +232,63 @@ def classify_contact(contact: dict, inspection_path: str, view: dict,
 
     Called by sim/mission.py. Gemini (REST, 8 s timeout) reads the inspection image; on any failure
     the local fallback decides. Safety guard: a mine_like contact is never cleared as non-UXO.
+    Adapts to visibility: in murky water, tells Gemini to weight sonar over camera and tightens
+    the safety policy (never clears as non-UXO without clear camera confirmation).
     """
     cid = contact["id"]
     cls = contact.get("cls", "other")
     conf = float(contact.get("conf", 0.5))
 
+    cam_path = None
+    if inspection_path:
+        stem, ext = os.path.splitext(inspection_path)
+        cam_path = stem + "_cam" + ext
+    visibility = _assess_visibility(cam_path)
+    murky = visibility["quality"] in ("murky", "unavailable")
+    adapted = "low_visibility" if murky else None
+
     if os.environ.get("GEMINI_API_KEY"):
         try:
+            vis_note = ""
+            if murky:
+                vis_note = (" VISIBILITY WARNING: camera image is murky/dark. "
+                            "Rely primarily on sonar evidence. Do not classify as non-UXO "
+                            "unless sonar clearly shows a ring (tyre) or irregular rock.")
+            elif visibility["quality"] == "degraded":
+                vis_note = " Note: camera image has reduced visibility. Cross-check with sonar."
+
             prompt = (f"Contact {cid}: sonar detector class={cls} (conf {conf:.2f}), "
                       f"sonar box size about {contact.get('size_m', 'unknown')} m (axis-aligned, rough), "
-                      f"inspected from the {(view or {}).get('chosen', 'unknown')}.")
+                      f"inspected from the {(view or {}).get('chosen', 'unknown')}.{vis_note}")
             result = _gemini_rest(model_name, SINGLE_SYSTEM_PROMPT, prompt, _inspection_images(contact, inspection_path))
             assert result["class"] in ("UXO", "non-UXO", "uncertain")
             verdict = {"contact_id": cid, "class": result["class"],
                        "confidence": float(result["confidence"]), "priority": 1,
                        "standoff_m": int(result["standoff_m"]), "reason": str(result["reason"]),
-                       "object_type": str(result.get("object_type", "unknown")), "source": "gemini"}
+                       "object_type": str(result.get("object_type", "unknown")), "source": "gemini",
+                       "visibility": visibility["quality"]}
+            if adapted:
+                verdict["adapted"] = adapted
             if cls == "mine_like" and verdict["class"] == "non-UXO":
                 verdict.update({"class": "uncertain", "standoff_m": 25, "source": "gemini+guard",
                                 "reason": verdict["reason"] + " (Detector flagged mine-like: kept as uncertain.)"})
+            if murky and verdict["class"] == "non-UXO":
+                verdict.update({"class": "uncertain", "standoff_m": 25, "source": "gemini+murky_guard",
+                                "reason": verdict["reason"] + " (Low visibility: cannot confirm non-UXO, kept as uncertain.)"})
             return verdict
         except Exception as e:
             print(f"[planner] Gemini classify_contact failed ({e!r}); local fallback", file=sys.stderr, flush=True)
 
     fb = LIVE_FALLBACK.get(cls, LIVE_FALLBACK["other"])
-    return {"contact_id": cid, "class": fb["class"], "confidence": round(conf * fb["confidence"], 2),
-            "priority": 1, "standoff_m": fb["standoff_m"], "reason": fb["reason"], "source": "local"}
+    verdict = {"contact_id": cid, "class": fb["class"], "confidence": round(conf * fb["confidence"], 2),
+               "priority": 1, "standoff_m": fb["standoff_m"], "reason": fb["reason"], "source": "local",
+               "visibility": visibility["quality"]}
+    if adapted:
+        verdict["adapted"] = adapted
+    if murky and verdict["class"] == "non-UXO":
+        verdict.update({"class": "uncertain", "standoff_m": 25,
+                        "reason": fb["reason"] + " (Low visibility: cannot confirm, kept as uncertain.)"})
+    return verdict
 
 
 def classify_with_template(contacts: list) -> list:
