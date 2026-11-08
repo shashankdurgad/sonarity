@@ -164,4 +164,4 @@ Every mission writes `runs/<id>/timing.json`, and `mission_log.jsonl` has a `tim
 | Imagine + A* re-plan | On the robot: NumPy, CPU (P5 + P2) | 1.0 s | 1.0 s |
 | Classify | Gemini via REST, 8 s timeout, template fallback (P1 + P4). Run `postmerge_clear_sand_s1` | about 4.1 s | 4.1 s |
 
-The robot holds position while it imagines and classifies, so none of this is on the critical path for safety. **Autonomy note for the summary:** the classify step calls Gemma (switched from Gemini after the final take) through the Gemini API. If it times out or fails, the on-robot template decides, so the robot never depends on the link to stay safe. Holding, keep-out and re-planning are always local. Detection is: about 0.1 s per frame against a 0.75 m step.
+The robot holds position while it imagines and classifies, so none of this is on the critical path for safety. **Autonomy note for the summary:** the classify step calls Gemma through the Gemini API. If it times out or fails, the on-robot template decides, so the robot never depends on the link to stay safe. Holding, keep-out and re-planning are always local. Detection is: about 0.1 s per frame against a 0.75 m step.

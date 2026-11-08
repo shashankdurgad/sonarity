@@ -35,7 +35,7 @@ OceanSim (Isaac Sim) ── sonar + camera ──► detector (YOLOv8) ──►
                                                        fallback; mine-like is never cleared as safe
 ```
 
-**Autonomy:** holding, keep-out, re-planning and the choice of inspection angle are always computed on the robot from its own sensor data, never from the simulator's ground truth. Classification uses **Gemma 4** (`gemma-4-26b-a4b-it`), an open multimodal model: it gets the camera and sonar images from the chosen side plus the first sonar detection, and returns a verdict with its reasoning in plain language (8 s timeout). Today it is called through the Gemini API; because Gemma is open-weight it can run on the robot's own GPU. If the call fails, the on-board rule decides, so the robot never depends on the link to stay safe. (The recorded final take was classified with Gemini before we switched to Gemma.)
+**Autonomy:** holding, keep-out, re-planning and the choice of inspection angle are always computed on the robot from its own sensor data, never from the simulator's ground truth. Classification uses **Gemma 4** (`gemma-4-26b-a4b-it`), an open multimodal model: it gets the camera and sonar images from the chosen side plus the first sonar detection, and returns a verdict with its reasoning in plain language (8 s timeout). Today it is called through the Gemini API; because Gemma is open-weight it can run on the robot's own GPU. If the call fails, the on-board rule decides, so the robot never depends on the link to stay safe.
 
 ### The imagination step
 
