@@ -45,11 +45,14 @@ from sim.objects import CLASS_SPECS, get_world, lawnmower, survey_area  # noqa: 
 from sim.sonar_geometry import SonarParams  # noqa: E402
 
 # Pluggable parts: real implementations replace the stand-ins as they land (LIVE_MISSION.md).
-try:
-    import ultralytics  # noqa: F401  P1's detect_frame needs torch; stock Isaac 6.0.1 has none
-    from perception.detect import detect_frame  # P1
-except Exception:
-    detect_frame = ml.detect_frame_standin
+if os.environ.get("UXO_DETECT_URL"):  # P1 YOLO via the deployed uxo-detector service (infra/mission.py)
+    from perception.detect_bridge import bridge_detect_frame as detect_frame
+else:
+    try:
+        import ultralytics  # noqa: F401  P1's detect_frame needs torch; stock Isaac 6.0.1 has none
+        from perception.detect import detect_frame  # P1
+    except Exception:
+        detect_frame = ml.detect_frame_standin
 try:
     from agent.planner import classify_contact  # P4
 except Exception:
@@ -188,7 +191,8 @@ def plan_inspection(c, here):
     start = backoff[-1] if backoff else here
     to_insp = ml.route(start, insp, circles)
     back = ml.route(insp, new_rest[k], circles) if new_rest else []
-    why = f"{c['id']} mine-like, {clearance:.1f} m from planned route (keep-out {ml.KEEP_OUT_M:.0f} m)"
+    why = (f"{c['id']} {'mine-like' if c['cls'] == 'mine_like' else 'unidentified'} contact, "
+           f"{clearance:.1f} m from planned route (keep-out {ml.KEEP_OUT_M:.0f} m)")
     queue.clear()
     for _ in range(6):
         queue.append(item(here, "HOLD", f"CONTACT {c['id']} AHEAD: stopping. {why}", contact=c["id"]))
@@ -247,7 +251,11 @@ while queue and step < args.max_steps:
                  "frame": f"sonar/{name}.png"})
     driven.append(pose)
 
-    dets = detect_frame(sonar, pose) if sonar.max() > 0 else []
+    try:
+        dets = detect_frame(sonar, pose) if sonar.max() > 0 else []
+    except Exception as e:  # service down or slow: keep the robot going on the stand-in
+        print(f"[mission] detector failed ({e!r}); stand-in this frame", flush=True)
+        dets = ml.detect_frame_standin(sonar, pose)
     for c in tracker.update(dets, f"sonar/{name}.png"):
         pending.append(c)
 
@@ -280,7 +288,9 @@ while queue and step < args.max_steps:
             handled.add(c["id"])
             route_ahead = [pose] + [q["pose"] for q in queue]
             clearance = ml.min_clearance(route_ahead, c["xy"])
-            if c["cls"] == "mine_like" and clearance < ml.KEEP_OUT_M + ml.CLEARANCE_M:
+            # Any contact near the route is a hazard until inspected: YOLO sometimes labels a real mine
+            # "other" (m2yolo seed 3: the uncovered bomb was c2 "other" and the robot passed 0.68 m from it).
+            if clearance < ml.KEEP_OUT_M + ml.CLEARANCE_M:
                 decision = "HOLD: " + plan_inspection(c, pose)
                 break
             circles.append({"id": c["id"], "xy": c["xy"], "r": ml.KEEP_OUT_M})

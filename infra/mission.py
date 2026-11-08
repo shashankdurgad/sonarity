@@ -26,7 +26,7 @@ EVENTS = "uxo-mission-events"
 
 
 @app.function(image=isaac_image, gpu="L40S", timeout=3600, volumes={CACHE_MOUNT: cache_volume, "/runs": runs_volume})
-def mission(run_id: str, seed: int, scenario: str, lanes: int, auto: list[str]) -> bytes:
+def mission(run_id: str, seed: int, scenario: str, lanes: int, auto: list[str], use_yolo: bool = True) -> bytes:
     link_caches()
     bus = modal.Dict.from_name(EVENTS, create_if_missing=True)
     bus.clear()
@@ -38,6 +38,10 @@ def mission(run_id: str, seed: int, scenario: str, lanes: int, auto: list[str]) 
            "--lanes", str(lanes), "--events-file", ev_file, "--status-file", st_file]
     for a in auto:
         cmd += ["--auto-event", a]
+    if use_yolo:  # Isaac's Python has no torch/modal: proxy frames to the deployed uxo-detector
+        sys.path.insert(0, "/root/repo")
+        from perception.detect_bridge import serve
+        print(f"[mission] YOLO detector via {serve()}", flush=True)
     proc = subprocess.Popen(cmd, cwd="/root/repo")
 
     def relay():  # Modal Dict <-> files the Isaac process reads/writes
@@ -66,9 +70,11 @@ def mission(run_id: str, seed: int, scenario: str, lanes: int, auto: list[str]) 
 
 
 @app.local_entrypoint()
-def main(seed: int = 3, scenario: str = "clear_sand", lanes: int = 0, auto: str = "", tag: str = "mission"):
+def main(seed: int = 3, scenario: str = "clear_sand", lanes: int = 0, auto: str = "", tag: str = "mission",
+         standin: bool = False):
+    """--standin uses the blob stand-in instead of YOLO (needs: modal deploy perception/detector_service.py)."""
     run_id = f"{tag}_{scenario}_s{seed}"
-    data = mission.remote(run_id, seed, scenario, lanes, [a for a in auto.split(",") if a])
+    data = mission.remote(run_id, seed, scenario, lanes, [a for a in auto.split(",") if a], not standin)
     os.makedirs("runs", exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         tar.extractall("runs", filter="data")

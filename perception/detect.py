@@ -48,8 +48,8 @@ def _to_dets(result, pose: dict, frame: str | None = None) -> list[dict]:
         dets.append({
             "xy": [round(float(v), 3) for v in pixel_to_world((x0 + x1) / 2, (y0 + y1) / 2, pose)],
             # Rough: long axis across the image means the object lies across the robot's heading.
-            "yaw": round(pose["yaw"] if h >= w else pose["yaw"] + math.pi / 2, 3),
-            "size_m": [round(max(w, h) * DEFAULT.m_per_px, 2), round(min(w, h) * DEFAULT.m_per_px, 2)],
+            "yaw": round(float(pose["yaw"] if h >= w else pose["yaw"] + math.pi / 2), 3),
+            "size_m": [round(float(max(w, h) * DEFAULT.m_per_px), 2), round(float(min(w, h) * DEFAULT.m_per_px), 2)],
             "cls": NAMES[int(box.cls)], "conf": round(float(box.conf), 3),
             "frame": frame, "box": [round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1)],
         })

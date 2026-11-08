@@ -160,11 +160,63 @@ def service(name: str = SURVEYS[0]) -> dict:
             "contacts": [(c["id"], c["cls"], c["xy"], c["hits"]) for c in tracker.contacts]}
 
 
+ISAAC_TORCH_CHECK = r"""
+import time, sys
+from isaacsim import SimulationApp
+app = SimulationApp({"headless": True})
+import omni.usd
+from pxr import UsdGeom
+stage = omni.usd.get_context().get_stage()
+UsdGeom.Cube.Define(stage, "/World/Cube")
+for _ in range(10):
+    app.update()
+import torch, numpy as np
+from ultralytics import YOLO
+print("ISAAC_PY", sys.version.split()[0], "torch", torch.__version__, "cuda", torch.cuda.is_available(), "numpy", np.__version__, flush=True)
+m = YOLO("/runs/yolo_run2/weights/best.pt")
+img = np.zeros((512, 512, 3), np.uint8)
+m.predict(img, verbose=False, imgsz=640)
+t0 = time.perf_counter()
+for _ in range(20):
+    m.predict(img, verbose=False, imgsz=640)
+    app.update()
+print("ISAAC_YOLO_PLUS_UPDATE_MS", round((time.perf_counter() - t0) / 20 * 1000, 1), flush=True)
+import warp as wp
+wp.init(); a = wp.zeros(10, device="cuda"); print("WARP_OK", a.device, flush=True)
+app.close()
+print("ISAAC_TORCH_DONE", flush=True)
+"""
+
+TORCH_PIP = "torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu126"
+
+
+@app.function(image=isaac_image, gpu="L40S", timeout=2400, volumes={"/runs": runs_vol})
+def isaac_torch() -> str:
+    import subprocess
+
+    def sh(cmd):
+        p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        return f"$ {cmd}\n[exit {p.returncode}]\n{p.stdout[-2500:]}\n{p.stderr[-2500:]}"
+
+    py = "/isaac-sim/python.sh"
+    log = [sh(f"{py} -c 'import numpy; print(numpy.__version__)'"),
+           sh(f"{py} -m pip install -q {TORCH_PIP}"),
+           sh(f"{py} -m pip install -q --no-deps ultralytics==8.3.40 ultralytics-thop py-cpuinfo pandas seaborn tqdm"),
+           sh(f"{py} -c 'import numpy; print(\"numpy after\", numpy.__version__)'")]
+    open("/tmp/check2.py", "w").write(ISAAC_TORCH_CHECK)
+    log.append(sh(f"{py} /tmp/check2.py 2>&1 | grep -E 'ISAAC_|WARP_OK|Error|error:|Traceback|Segmentation' | head -40"))
+    return "\n".join(log)
+
+
 @app.local_entrypoint()
 def main(only: str = "") -> None:
     calls = {}
     if only in ("", "compare"):
         calls["compare"] = compare.spawn()
+    if only == "isaac_torch":
+        calls["isaac_torch"] = isaac_torch.spawn()
+    if only == "bridge":
+        calls["bridge"] = bridge.spawn()
     if only == "service":
         calls["service"] = service.spawn()
     if only in ("", "isaac"):
@@ -176,3 +228,20 @@ def main(only: str = "") -> None:
             res = f"FAILED: {e!r}"
         print(f"===== {name} =====")
         print(json.dumps(res, indent=2) if isinstance(res, dict) else res)
+
+
+@app.function(image=isaac_image, timeout=600, volumes={"/runs": runs_vol})
+def bridge() -> str:
+    """Same setup as infra/mission.py: proxy in this (bare) python, client in Isaac's python."""
+    import subprocess
+
+    sys.path.insert(0, "/root/repo")
+    from perception.detect_bridge import serve
+
+    serve()
+    code = ("import sys; sys.path.insert(0, '/root/repo'); import numpy as np; from PIL import Image; "
+            "from perception.detect_bridge import bridge_detect_frame as f; "
+            "s = np.array(Image.open('/runs/train_clear_sand_s106/sonar/000060.png').convert('L')); "
+            "print('BRIDGE_DETS', f(s, {'x': 0, 'y': 0, 'yaw': 0}))")
+    p = subprocess.run(["/isaac-sim/python.sh", "-c", code], capture_output=True, text=True, cwd="/root/repo")
+    return p.stdout[-2000:] + p.stderr[-2000:]

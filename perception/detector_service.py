@@ -1,6 +1,8 @@
 """YOLO as a warm Modal service, for code that can't import torch (Isaac 6.0.1's Python has none).
 
 Deploy once (and again after replacing weights):  python -P -m modal deploy perception/detector_service.py
+A warm container keeps serving the OLD code/weights after a redeploy: also run
+    modal container list   then   modal container stop -y <uxo-detector container id>
 Call from anywhere with Modal credentials, e.g. the mission loop inside Isaac:
     from perception.detector_service import remote_detect_frame
     dets = remote_detect_frame(sonar, pose)        # same output as perception.detect.detect_frame
@@ -42,12 +44,15 @@ class Detector:
         self._detect = detect_frame
 
     @modal.method()
-    def detect(self, sonar_png: bytes, pose: dict, conf: float = 0.25) -> list[dict]:
+    def detect(self, sonar_png: bytes, pose: dict, conf: float = 0.25) -> str:
         import numpy as np
         from PIL import Image
 
         sonar = np.array(Image.open(io.BytesIO(sonar_png)).convert("L"))
-        return self._detect(sonar, pose, conf=conf, weights=WEIGHTS)
+        import json
+
+        # JSON text: callers (the mission's bare python) have no numpy to unpickle numpy scalars
+        return json.dumps(self._detect(sonar, pose, conf=conf, weights=WEIGHTS))
 
 
 _handle = None
@@ -56,10 +61,10 @@ _handle = None
 def remote_detect_frame(sonar, pose: dict, conf: float = 0.25) -> list[dict]:
     """Send one sonar frame (H x W uint8 array, or PNG bytes) to the deployed detector."""
     global _handle
-    import numpy as np
-    from PIL import Image
+    if not isinstance(sonar, (bytes, bytearray)):  # bytes path needs no numpy/PIL (bare Modal python)
+        import numpy as np
+        from PIL import Image
 
-    if not isinstance(sonar, (bytes, bytearray)):
         img = np.asarray(sonar)
         if img.dtype != np.uint8:
             img = np.clip(img * (255.0 if img.max() <= 1.0 else 1.0), 0, 255).astype(np.uint8)
@@ -69,4 +74,6 @@ def remote_detect_frame(sonar, pose: dict, conf: float = 0.25) -> list[dict]:
     if _handle is None:
         _handle = modal.Cls.from_name(APP_NAME, CLS_NAME)()
     pose = {k: float(pose[k]) for k in ("x", "y", "yaw")}
-    return _handle.detect.remote(bytes(sonar), pose, conf)
+    import json
+
+    return json.loads(_handle.detect.remote(bytes(sonar), pose, conf))
