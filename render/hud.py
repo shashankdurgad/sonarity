@@ -168,6 +168,13 @@ def compose_frame(f):
     arr = np.asarray(base.convert("RGB")).astype(np.float32) / 255
     yy = np.linspace(0, 1, H)[:, None, None]
     arr = arr * (0.86 + 0.14 * yy) + np.array([0.0, 0.035, 0.06]) * (1 - yy) * 0.6
+    mk = TL.murk(f)
+    if mk > 0.01:  # turbid water: scatter blur + distance haze (stronger toward the far, upper frame)
+        soft = np.asarray(Image.fromarray((arr * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1 + 4 * mk))
+                          ).astype(np.float32) / 255
+        arr = arr + (soft - arr) * (0.6 * mk)
+        haze = np.clip(mk * (0.30 + 0.55 * (1 - yy) ** 1.5), 0, 0.85)
+        arr = arr + (np.array([0.10, 0.27, 0.28]) - arr) * haze
     lum = arr.max(-1, keepdims=True)
     bright = np.clip((lum - 0.72) / 0.28, 0, 1) * arr
     small = Image.fromarray((bright * 255).astype(np.uint8)).resize((W // 4, H // 4), Image.BILINEAR)
@@ -207,7 +214,7 @@ def compose_frame(f):
                         outline=RED + (a,), width=3)
             text(d, (W / 2, 160), "ALERT  //  " + msg, F_MED, (255, 210, 200), anchor="ma")
     # murk notice
-    if TL.murk(f) > 0.3 and f < TL.n_mission_frames:
+    if TL.murk(f) - TL.murk_base > 0.3 and f < TL.n_mission_frames:
         text(d, (W - 52, 150), "VISIBILITY DEGRADED  -  CAMERA UNRELIABLE", F_SM, YELLOW, anchor="ra")
 
     # contact list (right)

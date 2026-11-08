@@ -98,7 +98,8 @@ class Timeline:
                 self.contact_cls[c["id"]] = c["cls"]
         self.contact_cls = getattr(self, "contact_cls", {})
         # murk level per step
-        self.murk_steps = [(e["step"], 1.0 if e["kind"] == "murk_on" else 0.0)
+        self.murk_base = 0.55 if self.world.get("scenario") == "murky" else 0.0  # murky site: hazy all run
+        self.murk_steps = [(e["step"], 1.0 if e["kind"] == "murk_on" else self.murk_base)
                            for e in self.events if e["kind"] in ("murk_on", "murk_off")]
         # site bounds
         xs = [o["xyz"][0] for o in objs] + [s["pose"]["x"] for s in L]
@@ -146,7 +147,7 @@ class Timeline:
         return f / FPS
 
     def murk(self, f: int) -> float:
-        lvl, t = 0.0, f / self.F
+        lvl, t = self.murk_base, f / self.F
         for st, v in self.murk_steps:
             if t >= st:
                 lvl = v if t >= st + 8 else lvl + (v - lvl) * (t - st) / 8.0
@@ -287,6 +288,14 @@ class Timeline:
             sc[f] = sc[f - 1] + (cam[f] - sc[f - 1]) * a
             st_[f] = st_[f - 1] + (tgt[f] - st_[f - 1]) * a
             sf[f] = sf[f - 1] + (fov[f] - sf[f - 1]) * a
+        for f in range(n):  # shot blends can swing the camera through the robot: keep >= 5.5 m away
+            if shots[f] == "intro":
+                continue
+            d = sc[f] - self.robot_pos[f]
+            dist = float(np.linalg.norm(d))
+            if dist < 5.5:
+                d = d / (dist + 1e-6) if dist > 1e-3 else np.array([0.0, -1.0, 0.3])
+                sc[f] = self.robot_pos[f] + d * 5.5
         sc[:, 2] = np.maximum(sc[:, 2], 0.6)  # never below the sand
         self.cam_pos, self.cam_tgt, self.cam_fov, self.shots = sc, st_, sf, shots
 
