@@ -133,47 +133,76 @@ Respond with a JSON object with exactly these fields:
 Return ONLY the JSON object, no markdown fences or extra text."""
 
 
+GEMINI_TIMEOUT_S = 8.0  # the robot is holding position while it waits (LIVE_MISSION.md)
+
+
+def _gemini_rest(model_name: str, system: str, prompt: str, image_path: str | None,
+                 timeout: float = GEMINI_TIMEOUT_S) -> dict:
+    """One Gemini call over REST with the standard library only (Isaac's Python has no google-genai)."""
+    import urllib.request
+
+    parts = [{"text": prompt}]
+    if image_path and os.path.exists(image_path):
+        ext = os.path.splitext(image_path)[1].lower()
+        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(ext, "image/png")
+        parts.append({"inline_data": {"mime_type": mime, "data": _encode_image(image_path)}})
+    body = {"system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2,
+                                 "thinkingConfig": {"thinkingLevel": os.environ.get("GEMINI_THINKING", "low")}}}
+    req = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+        data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": os.environ["GEMINI_API_KEY"]})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        out = json.loads(r.read())
+    text = out["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(text)
+
+
+# Live fallback never clears a contact it can't verify: "other" -> uncertain with a standoff.
+LIVE_FALLBACK = {
+    "mine_like": {"class": "UXO", "confidence": 0.75, "standoff_m": 50,
+                  "reason": "Sonar return consistent with a mine-like object; treated as UXO."},
+    "other": {"class": "uncertain", "confidence": 0.5, "standoff_m": 25,
+              "reason": "Detector suggests debris, but it was not verified; keep standoff and revisit."},
+}
+
+
 def classify_contact(contact: dict, inspection_path: str, view: dict,
                      model_name: str = "gemini-3.8-flash") -> dict:
     """Classify a single contact during the live mission loop.
 
-    Called by sim/mission.py. Falls back to template if Gemini is unavailable.
+    Called by sim/mission.py. Gemini (REST, 8 s timeout) reads the inspection image; on any failure
+    the local fallback decides. Safety guard: a mine_like contact is never cleared as non-UXO.
     """
     cid = contact["id"]
     cls = contact.get("cls", "other")
-    conf = contact.get("conf", 0.5)
+    conf = float(contact.get("conf", 0.5))
 
-    if genai is not None and os.environ.get("GEMINI_API_KEY"):
+    if os.environ.get("GEMINI_API_KEY"):
         try:
-            client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
             prompt = (f"Contact {cid}: detector class={cls}, conf={conf:.2f}, "
                       f"size={contact.get('size_m', 'unknown')}, "
-                      f"viewed from {view.get('chosen', 'unknown')} angle.")
-            parts = [prompt]
-            if os.path.exists(inspection_path):
-                raw = open(inspection_path, "rb").read()
-                ext = os.path.splitext(inspection_path)[1].lower()
-                mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(ext, "image/png")
-                parts.append(genai.types.Part.from_bytes(data=raw, mime_type=mime))
-            response = client.models.generate_content(
-                model=model_name, contents=parts,
-                config=genai.types.GenerateContentConfig(system_instruction=SINGLE_SYSTEM_PROMPT),
-            )
-            text = response.text.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            result = json.loads(text)
+                      f"viewed from {(view or {}).get('chosen', 'unknown')} angle.")
+            result = _gemini_rest(model_name, SINGLE_SYSTEM_PROMPT, prompt, inspection_path)
             assert result["class"] in ("UXO", "non-UXO", "uncertain")
-            return {"contact_id": cid, "class": result["class"],
-                    "confidence": float(result["confidence"]), "priority": 1,
-                    "standoff_m": int(result["standoff_m"]), "reason": result["reason"]}
+            verdict = {"contact_id": cid, "class": result["class"],
+                       "confidence": float(result["confidence"]), "priority": 1,
+                       "standoff_m": int(result["standoff_m"]), "reason": str(result["reason"]),
+                       "source": "gemini"}
+            if cls == "mine_like" and verdict["class"] == "non-UXO":
+                verdict.update({"class": "uncertain", "standoff_m": 25, "source": "gemini+guard",
+                                "reason": verdict["reason"] + " (Detector flagged mine-like: kept as uncertain.)"})
+            return verdict
         except Exception as e:
-            print(f"[planner] Gemini classify_contact failed ({e}); template fallback", file=sys.stderr)
+            print(f"[planner] Gemini classify_contact failed ({e!r}); local fallback", file=sys.stderr, flush=True)
 
-    template = TEMPLATE_VERDICTS.get(cls, TEMPLATE_VERDICTS["other"])
-    return {"contact_id": cid, "class": template["class"],
-            "confidence": round(conf * template["confidence"], 2), "priority": 1,
-            "standoff_m": template["standoff_m"], "reason": template["reason"]}
+    fb = LIVE_FALLBACK.get(cls, LIVE_FALLBACK["other"])
+    return {"contact_id": cid, "class": fb["class"], "confidence": round(conf * fb["confidence"], 2),
+            "priority": 1, "standoff_m": fb["standoff_m"], "reason": fb["reason"], "source": "local"}
 
 
 def classify_with_template(contacts: list) -> list:
