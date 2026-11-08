@@ -220,19 +220,33 @@ def choose_view(c, here, exclude=()):
 reinspect = []  # contacts whose inspection was interrupted by a newer, closer contact
 revisit = []  # {"contact", "side"}: classed uncertain on the first look; look again from another side at the end
 
+# Camera health, from the camera image only (never from sim.world). Murky water turns the frame into grainy
+# noise: mean |pixel gradient| is <= 0.95 on every clear-water frame we've recorded and >= 6.3 on every murky
+# one (murk_on events and the murky scenario), so 3.0 sits well between them. Median of 3 frames to debounce.
+CAM_NOISE_DEGRADED = 3.0
+cam_noise_hist = deque(maxlen=3)
+camera_degraded = False
+
+
+def camera_noise(cam):
+    g = np.asarray(cam, dtype=np.float32)
+    g = g[..., :3].mean(axis=2) if g.ndim == 3 else g
+    return float(np.abs(np.diff(g, axis=0)).mean() + np.abs(np.diff(g, axis=1)).mean())
+
 
 def plan_revisit(r, here):
     """End of survey: go back to a contact classed uncertain and inspect it from a side not yet tried.
     Returns the decision text, or None if no other side is clear / reachable."""
     c, first = r["contact"], r["side"]
-    view = choose_view(c, here, exclude={first})
+    view = choose_view(c, here, exclude=() if r.get("murk") else {first})  # murk: any side, same one is fine
     if view is None or not ml.pose_clear(view["pose"], circles):
         return None
     insp = view["pose"]
     path = ml.route(here, insp, circles)
     if not path and math.dist((here["x"], here["y"]), (insp["x"], insp["y"])) > 0.5:
         return None
-    why = f"{c['id']} was uncertain from the {first}: looking again from the {view['chosen']}"
+    why = (f"{c['id']} was {'seen in murky water' if r.get('murk') else 'uncertain'} from the {first}: "
+           f"looking again from the {view['chosen']}")
     for _ in range(3):
         queue.append(item(here, "REPLAN", f"survey done. Revisiting {why}", contact=c["id"]))
     for q in path:
@@ -370,6 +384,19 @@ while queue and step < args.max_steps:
     sim.move_to(pose["x"], pose["y"], pose["yaw"], cam_look_at=look)
     sonar, cam = sim.observe()
     timing["sense_sim_s"] = round(time.time() - _t, 3)  # simulator render (stands in for the real sensors)
+    cam_note = ""
+    if cam is not None and cam.max() > 0:
+        noise = camera_noise(cam)
+        cam_noise_hist.append(noise)
+        now_bad = sorted(cam_noise_hist)[len(cam_noise_hist) // 2] > CAM_NOISE_DEGRADED
+        if now_bad != camera_degraded:
+            camera_degraded = now_bad
+            cam_note = (f"CAMERA DEGRADED (image noise {noise:.1f}, clear water < 1): murky water, relying on "
+                        f"sonar. Contacts inspected now are marked uncertain and revisited when it clears"
+                        if now_bad else f"CAMERA CLEAR again (image noise {noise:.1f}): camera back in use")
+            print(f"[mission] step {step}: {cam_note}", flush=True)
+    else:
+        noise = None
     chase = sim.chase()
     name = f"{step:06d}"
     Image.fromarray(sonar, mode="L").save(os.path.join(out, "sonar", f"{name}.png"))
@@ -407,6 +434,11 @@ while queue and step < args.max_steps:
                 tgt = ml.classify_standin(c, sonar)
         else:
             tgt = ml.classify_standin(c, sonar)
+        if camera_degraded and tgt["class"] != "uncertain":  # don't guess from a murky camera
+            tgt = {**tgt, "class": "uncertain", "standoff_m": max(tgt.get("standoff_m", 0) or 0, 25),
+                   "camera_degraded": True,
+                   "reason": (f"Camera degraded by murky water (low contrast, noisy): this look ({tgt['class']}) is "
+                              f"not trusted, so marked uncertain for a revisit in clearer water. ({tgt['reason']})")}
         if it.get("revisit"):  # second look: replace the verdict, keep the first one alongside
             first_side = it["revisit"]
             i_old = next(i for i, t in enumerate(targets) if t["contact_id"] == c["id"])
@@ -431,7 +463,7 @@ while queue and step < args.max_steps:
                                "imagined": view.get("imagined", {}), "inspection": ip, "reason": view.get("reason", "")})
             decision = f"verdict {c['id']}: {tgt['class']} ({tgt['reason']})"
             if tgt["class"] == "uncertain" and not args.no_revisit:
-                revisit.append({"contact": c, "side": view["chosen"]})
+                revisit.append({"contact": c, "side": view["chosen"], "murk": camera_degraded})
 
     # Safety rule: act on a new contact in ANY moving state (a contact seen while resuming or transiting
     # to an inspection must still stop the robot). Only HOLD/REPLAN/BACKOFF defer it (robot not advancing).
@@ -463,6 +495,14 @@ while queue and step < args.max_steps:
             timing["plan_s"] = round(time.time() - _t, 3)
 
     # Survey finished: go back to contacts classed uncertain and look from another side.
+    if not queue and revisit and camera_degraded:  # a second look would be just as blind
+        for r in revisit:
+            t = next(t for t in targets if t["contact_id"] == r["contact"]["id"])
+            t["reason"] += " Water still murky at the end of the survey: flagged for revisit in clear water or diver / ROV."
+        decision = ((decision + " | ") if decision else "") + (
+            f"REVISIT postponed: camera still degraded; {', '.join(r['contact']['id'] for r in revisit)} "
+            f"flagged for a later pass in clear water")
+        revisit.clear()
     while not queue and revisit:  # (also right after a verdict: the last queued step may be a capture)
         r = revisit.pop(0)
         why = plan_revisit(r, pose)
@@ -473,6 +513,11 @@ while queue and step < args.max_steps:
             t["reason"] += " No other clear, reachable side to revisit from: flag for diver / ROV confirmation."
             print(f"[mission] step {step}: no revisit possible for {r['contact']['id']}", flush=True)
 
+    if cam_note:
+        decision = (cam_note + " | " + decision) if decision else cam_note
+    if camera_degraded:  # shown on the map / in the log; banner prefixes ("inspecting ...") are unchanged
+        it = {**it, "banner": it["banner"] + " [CAMERA DEGRADED: relying on sonar]"}
+
     path_now = [it2["pose"] for it2 in queue]
     preview(step, sonar, chase, dets, it, path_now)
     log.write(json.dumps({
@@ -480,6 +525,7 @@ while queue and step < args.max_steps:
         "event": caption if step <= caption_until else "", "dets": [{k: d[k] for k in ("xy", "cls", "conf")} for d in dets],
         "contacts": [{k: c[k] for k in ("id", "xy", "cls", "conf", "hits")} for c in tracker.confirmed()],
         "keep_out": circles, "decision": decision, "timing": timing,
+        "camera": {"noise": None if noise is None else round(noise, 2), "degraded": camera_degraded},
         "planned_path": [[round(q["x"], 2), round(q["y"], 2)] for q in path_now[::4]],
     }) + "\n")
     if decision:
