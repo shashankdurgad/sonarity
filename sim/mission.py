@@ -46,6 +46,7 @@ from sim.sonar_geometry import SonarParams  # noqa: E402
 
 # Pluggable parts: real implementations replace the stand-ins as they land (LIVE_MISSION.md).
 try:
+    import ultralytics  # noqa: F401  P1's detect_frame needs torch; stock Isaac 6.0.1 has none
     from perception.detect import detect_frame  # P1
 except Exception:
     detect_frame = ml.detect_frame_standin
