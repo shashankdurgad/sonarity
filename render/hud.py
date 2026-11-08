@@ -184,9 +184,10 @@ def compose_frame(f):
     base = Image.composite(base, Image.alpha_composite(base, dark), vig)
 
     # top bar
-    panel(d, (30, 26, 520, 112))
+    info = f"MISSION {TL.run_id.upper()}   T+{int(t // 60):02d}:{int(t % 60):02d}   STEP {step:03d}"
+    panel(d, (30, 26, 520, 112))  # banner starts at x=540
     text(d, (52, 34), "AUV-01  //  MINE SURVEY", F_TITLE, CYAN)
-    text(d, (52, 74), f"MISSION {TL.run_id.upper()}   T+{int(t // 60):02d}:{int(t % 60):02d}   STEP {step:03d}", F_MONO)
+    text(d, (52, 76), info, F_MONO if 52 + d.textlength(info, font=F_MONO) < 505 else F_MONO_S)
     # state chip + banner
     bw = 840
     panel(d, (W / 2 - bw / 2, 26, W / 2 + bw / 2, 128), accent=scol)
