@@ -85,10 +85,29 @@ Everything below is **new functions next to the existing batch code**. Keep the 
 | # | Milestone | Who | Done when |
 |---|---|---|---|
 | M0 | Gate B batch baseline saved | P4 + all | `demo.mp4` from a real OceanSim run committed |
-| M1 | Loop runs with stand-ins | P2 | A mission run with a live-triggered `uncover_bomb`: the robot holds, detours and resumes, with `mission_log.jsonl` written. Stand-in detector and planner |
+| M1 ✅ | Loop runs with stand-ins | P2 | A mission run with a live-triggered `uncover_bomb`: the robot holds, detours and resumes, with `mission_log.jsonl` written. Stand-in detector and planner |
 | M2 | Real detector in the loop | P1 + P2 | `detect_frame` + `ContactTracker` replace the stand-ins; the bomb is detected live |
 | M3 | Real imagine + classify in the loop | P5 + P4 + P2 | Inspection from the chosen angle outside the circle; verdict from `classify_contact` |
 | M4 | Mission video | P5 + P3 | The composed mission view from one continuous run, with a human-triggered change |
 | M5 | Record final takes | all | 2–3 takes; pick the best |
 
 M1 doesn't wait on anyone, and P1, P4 and P5 can write their functions against the formats above in parallel. Post in the group chat if you need to change any format here (same rule as PLAN.md §11).
+
+## M1 status (done, Sun 8 Nov ~00:30)
+
+```bash
+python -P -m modal run infra/mission.py::main --seed 3 [--lanes 2] [--auto "uncover_bomb@40,murk_on@95"]   # -> runs/mission_<scenario>_s<seed>/mission.mp4
+python -P -m modal run infra/mission.py::status                          # while it runs
+python -P -m modal run infra/mission.py::trigger --event uncover_bomb    # or drop_object --cls rock, murk_on, murk_off
+```
+
+Tested on seeds 3, 5 and 7 (2–3 lanes, bomb uncovered plus murk, both triggered automatically; the live trigger from the laptop was also tested). In every run the uncovered bomb was detected by sonar and the robot held, re-planned and inspected. **No keep-out violations** (closest approach to a confirmed mine-like contact was 4.0 m or more).
+
+**How it works / gotchas (P2):**
+- `SimSession(world=..., reserve=...)`: the world and the hidden objects for events must be created **before** the sensors start. Objects added later sometimes never get sonar labels: they cast a shadow but give no echo.
+- Events **reveal** a pre-created object hidden under the seabed. They're placed 11–13 m ahead on the route, 1–1.6 m off the centreline and angled across it. End-on bombs barely echo, and dead-ahead objects sit in OceanSim's bright centre streak. An event is skipped if less than about 13 m of route is left.
+- Path planning is grid A* around the union of keep-out circles (`mission_logic.route` / `detour`). New contacts are acted on in any moving state. If the robot confirms a contact when it's already inside a keep-out zone, it backs off.
+- **Stand-in detector limitation:** it masks the centre streak, so it can't see within about ±0.6 m of dead ahead. **P1: please check `detect_frame` for the same blind spot.** The stand-in also can't tell classes apart: everything is `mine_like`, inspected and given an `uncertain` verdict.
+- Murk only degrades the camera. Nothing reacts to it yet; P4's "camera unusable, so mark contacts `uncertain`" logic should do that.
+
+**Plug-in points in `sim/mission.py`:** `perception.detect.detect_frame` (used when `ultralytics` imports inside Isaac), `agent.planner.classify_contact(contact, inspection_png_path, view)` (wrapped in try/except, with the stand-in as fallback), and `ml.choose_view_standin`, which P5's `imagine_contact` replaces. Any inspection pose it picks must pass `ml.pose_clear(pose, circles)`.

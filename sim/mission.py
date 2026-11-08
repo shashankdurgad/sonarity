@@ -174,7 +174,10 @@ def plan_inspection(c, here):
             if ml.pose_clear(cand, circles):
                 insp = view["pose"] = cand
                 break
-    k = min(range(len(new_rest)), key=lambda i: math.dist((new_rest[i]["x"], new_rest[i]["y"]), c["xy"])) if new_rest else 0
+    # Rejoin where the route FIRST passes near the contact (its detour). The globally nearest point can be
+    # on a later lane, which would silently skip the rest of the current lane.
+    near_r = ml.KEEP_OUT_M + ml.CLEARANCE_M + 2.5
+    k = next((i for i, q in enumerate(new_rest) if math.dist((q["x"], q["y"]), c["xy"]) <= near_r), 0)
     backoff = []
     if not ml.pose_clear(here, circles, margin=0.0):
         # Confirmed too late: retrace the driven path until clear of every keep-out zone.

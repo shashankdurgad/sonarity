@@ -169,51 +169,100 @@ def straight(a: dict, b: dict, step: float = STEP_M) -> list[dict]:
     return _yawed(pts)
 
 
-def detour(path: list[dict], circles: list[dict], step: float = STEP_M, passes: int = 4) -> list[dict]:
-    """Replace every run of poses inside a keep-out circle with an arc around it (shorter side).
-    Repeats, because an arc around one circle can cut into a neighbouring one."""
-    for _ in range(passes):
-        path = _detour_once(path, circles, step)
-        if all(pose_clear(q, circles, margin=0.0) for q in path):
+def _blocked(xy, circles, inflate: float) -> bool:
+    return any(math.dist(xy, c["xy"]) < c["r"] + inflate for c in circles)
+
+
+def _seg_clear(p, q, circles, inflate: float, step: float = 0.25) -> bool:
+    n = max(int(math.dist(p, q) / step), 1)
+    return not any(_blocked((p[0] + (q[0] - p[0]) * k / n, p[1] + (q[1] - p[1]) * k / n), circles, inflate)
+                   for k in range(n + 1))
+
+
+def _astar(a, b, circles, inflate: float, res: float = 0.5, margin: float = 12.0):
+    """Grid A* (8-connected) from a to b avoiding inflated keep-out circles; handles overlapping zones.
+    Returns a smoothed list of (x, y) waypoints, or None."""
+    import heapq
+
+    xs = [a[0], b[0]] + [c["xy"][0] for c in circles]
+    ys = [a[1], b[1]] + [c["xy"][1] for c in circles]
+    x0, y0 = min(xs) - margin, min(ys) - margin
+    nx, ny = int((max(xs) + margin - x0) / res) + 1, int((max(ys) + margin - y0) / res) + 1
+    cell = lambda p: (min(max(int(round((p[0] - x0) / res)), 0), nx - 1), min(max(int(round((p[1] - y0) / res)), 0), ny - 1))
+    pos = lambda c: (x0 + c[0] * res, y0 + c[1] * res)
+    free = lambda c: not _blocked(pos(c), circles, inflate)
+    s, g = cell(a), cell(b)
+    openq, came, cost = [(0.0, s)], {s: None}, {s: 0.0}
+    while openq:
+        _, cur = heapq.heappop(openq)
+        if cur == g:
             break
-    return path
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                nb = (cur[0] + dx, cur[1] + dy)
+                if (dx or dy) and 0 <= nb[0] < nx and 0 <= nb[1] < ny and (free(nb) or nb == g):
+                    nc = cost[cur] + math.hypot(dx, dy)
+                    if nc < cost.get(nb, 1e18):
+                        cost[nb], came[nb] = nc, cur
+                        heapq.heappush(openq, (nc + math.dist(nb, g), nb))
+    if g not in came:
+        return None
+    cells, c = [], g
+    while c is not None:
+        cells.append(pos(c))
+        c = came[c]
+    pts = [a] + cells[::-1][1:-1] + [b]
+    smooth, i = [pts[0]], 0  # string-pulling: skip waypoints while the straight line stays clear
+    while i < len(pts) - 1:
+        j = len(pts) - 1
+        while j > i + 1 and not _seg_clear(pts[i], pts[j], circles, inflate):
+            j -= 1
+        smooth.append(pts[j])
+        i = j
+    return smooth
 
 
-def _detour_once(path: list[dict], circles: list[dict], step: float) -> list[dict]:
-    for c in circles:
-        cx, cy = c["xy"]
-        r = c["r"] + CLEARANCE_M
-        out, i = [], 0
-        while i < len(path):
-            p = path[i]
-            if math.dist((p["x"], p["y"]), (cx, cy)) >= r:
-                out.append(p)
-                i += 1
-                continue
-            j = i
-            while j < len(path) and math.dist((path[j]["x"], path[j]["y"]), (cx, cy)) < r:
-                j += 1
-            a_pt = out[-1] if out else path[i]
-            b_pt = path[j] if j < len(path) else path[-1]
-            a0 = math.atan2(a_pt["y"] - cy, a_pt["x"] - cx)
-            a1 = math.atan2(b_pt["y"] - cy, b_pt["x"] - cx)
-            sweep = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi  # shorter way round
-            if abs(sweep) < 1e-3:
-                sweep = math.pi
-            n = max(int(abs(sweep) * r / step), 2)
-            arc = [(cx + r * math.cos(a0 + sweep * k / n), cy + r * math.sin(a0 + sweep * k / n)) for k in range(n + 1)]
-            out.extend(_yawed(arc))
-            i = j
-        path = out
-    return path
+def _resample(waypoints, step: float = STEP_M):
+    out = []
+    for p, q in zip(waypoints, waypoints[1:]):
+        n = max(int(math.dist(p, q) / step), 1)
+        out += [(p[0] + (q[0] - p[0]) * k / n, p[1] + (q[1] - p[1]) * k / n) for k in range(1, n + 1)]
+    return out
 
 
-def route(a: dict, b: dict, circles: list[dict]) -> list[dict]:
-    """Straight transit a -> b, bent around keep-out circles. Final pose keeps b's yaw."""
-    pts = detour(straight(a, b), circles)
+def route(a: dict, b: dict, circles: list[dict], step: float = STEP_M) -> list[dict]:
+    """Transit a -> b avoiding every keep-out circle (+ CLEARANCE_M). Straight if clear, else grid A*.
+    Final pose keeps b's yaw."""
+    pa, pb = (a["x"], a["y"]), (b["x"], b["y"])
+    if _seg_clear(pa, pb, circles, CLEARANCE_M * 0.5):
+        pts = straight(a, b, step)
+    else:
+        wp = _astar(pa, pb, circles, CLEARANCE_M) or [pa, pb]
+        pts = _yawed(_resample(wp, step))
     if pts:
         pts[-1] = {**pts[-1], "yaw": b.get("yaw", pts[-1]["yaw"])}
     return pts
+
+
+def detour(path: list[dict], circles: list[dict], step: float = STEP_M) -> list[dict]:
+    """Replace every run of poses that enters a keep-out circle with an A* route around it, rejoining at
+    the next pose that is clear. Works with overlapping circles (their union is avoided)."""
+    clear = lambda q: not _blocked((q["x"], q["y"]), circles, CLEARANCE_M * 0.5)
+    out, i = [], 0
+    while i < len(path):
+        if clear(path[i]):
+            out.append(path[i])
+            i += 1
+            continue
+        j = i
+        while j < len(path) and not clear(path[j]):
+            j += 1
+        start = out[-1] if out else path[i]
+        if j >= len(path):  # path ends inside a zone: stop at the last clear pose
+            break
+        out.extend(route(start, path[j], circles, step)[:-1])
+        i = j
+    return out
 
 
 def min_clearance(path: list[dict], xy) -> float:
