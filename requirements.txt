@@ -1,4 +1,4 @@
-# Local (laptop) side of Look Before You Dive. Python 3.10+.
+# Local (laptop) side of Sonarity. Python 3.10+.
 # The simulator itself (Isaac Sim 6.0.1 + OceanSim: isaacsim, omni, pxr, carb, warp) runs inside the
 # Modal image built by infra/image.py and is not installed from here.
 
@@ -13,7 +13,7 @@ modal
 # Sonar detector (perception/): YOLOv8, pulls in torch
 ultralytics
 
-# Classification with Gemini (agent/planner.py); optional, falls back to a local rule without it
+# Classification with Gemma via the Google GenAI API (agent/planner.py); optional, falls back to a local rule without it
 google-genai
 
 # Dataset inspection helper (infra/inspect_datasets.py)

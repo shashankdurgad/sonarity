@@ -107,8 +107,8 @@ Everything below is **new functions next to the existing batch code**. Keep the 
 - **Decide where YOLO runs.** Inside Isaac's Python (check `ultralytics` installs without breaking Isaac's own torch), or as a separate Modal function called each frame (about 0.1–0.3 s is fine). Tell P2.
 
 ### P4 (planner, integration)
-- `agent/planner.py: classify_contact(contact: dict, inspection_img: str | np.ndarray, viewpoint: dict | None) -> dict` returning one `targets.json` entry. Use the template fallback if Gemini fails or takes more than about 8 s, because the robot is holding position while it waits.
-- **Autonomy (15%):** the judges score remote calls lowest ("keep it on the device"). The template or local rule must make the decision; Gemini can at most write the `reason` text. Say that in the technical summary.
+- `agent/planner.py: classify_contact(contact: dict, inspection_img: str | np.ndarray, viewpoint: dict | None) -> dict` returning one `targets.json` entry. Use the template fallback if Gemma fails or takes more than about 8 s, because the robot is holding position while it waits.
+- **Autonomy (15%):** the judges score remote calls lowest ("keep it on the device"). The template or local rule must make the decision; Gemma can at most write the `reason` text. Say that in the technical summary.
 - Mission metrics in `viz/metrics.py`: minimum distance from the robot to each mine (old path vs new path), time from change to re-plan, and contacts found.
 - Keep owning `run_demo.py` and the batch baseline.
 
@@ -164,4 +164,4 @@ Every mission writes `runs/<id>/timing.json`, and `mission_log.jsonl` has a `tim
 | Imagine + A* re-plan | On the robot: NumPy, CPU (P5 + P2) | 1.0 s | 1.0 s |
 | Classify | Gemini via REST, 8 s timeout, template fallback (P1 + P4). Run `postmerge_clear_sand_s1` | about 4.1 s | 4.1 s |
 
-The robot holds position while it imagines and classifies, so none of this is on the critical path for safety. **Autonomy note for the summary:** the classify step calls a remote model (Gemini). If it times out or fails, the on-robot template decides, so the robot never depends on the link to stay safe. Holding, keep-out and re-planning are always local. Detection is: about 0.1 s per frame against a 0.75 m step.
+The robot holds position while it imagines and classifies, so none of this is on the critical path for safety. **Autonomy note for the summary:** the classify step calls Gemma (switched from Gemini after the final take) through the Gemini API. If it times out or fails, the on-robot template decides, so the robot never depends on the link to stay safe. Holding, keep-out and re-planning are always local. Detection is: about 0.1 s per frame against a 0.75 m step.

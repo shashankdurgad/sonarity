@@ -1,4 +1,4 @@
-"""Gemini planner: reads contacts, crops and inspection images, writes targets.json."""
+"""Gemma planner: reads contacts, crops and inspection images, writes targets.json."""
 
 import base64
 import json
@@ -58,7 +58,7 @@ def _load_viewpoints(run_dir: str) -> dict:
 
 
 def _build_prompt(contacts: list, run_dir: str) -> tuple[str, list]:
-    """Build the text prompt and list of image parts for Gemini."""
+    """Build the text prompt and list of image parts for Gemma."""
     viewpoints = _load_viewpoints(run_dir)
     lines = ["Classify each contact:\n"]
     images = []
@@ -83,8 +83,8 @@ def _build_prompt(contacts: list, run_dir: str) -> tuple[str, list]:
     return "\n".join(lines), images
 
 
-def classify_with_gemini(contacts: list, run_dir: str, model_name: str = "gemini-3.8-flash") -> list:
-    """Call Gemini to classify contacts. Returns list of target dicts."""
+def classify_with_gemma(contacts: list, run_dir: str, model_name: str = "gemma-4-26b-a4b-it") -> list:
+    """Call Gemma to classify contacts. Returns list of target dicts."""
     if genai is None:
         raise ImportError("google-generativeai not installed")
 
@@ -151,12 +151,12 @@ Respond with a JSON object with exactly these fields:
 Return ONLY the JSON object."""
 
 
-GEMINI_TIMEOUT_S = 8.0  # the robot is holding position while it waits (LIVE_MISSION.md)
+GEMMA_TIMEOUT_S = 8.0  # the robot is holding position while it waits (LIVE_MISSION.md)
 
 
-def _gemini_rest(model_name: str, system: str, prompt: str, images,
-                 timeout: float = GEMINI_TIMEOUT_S) -> dict:
-    """One Gemini call over REST with the standard library only (Isaac's Python has no google-genai).
+def _gemma_rest(model_name: str, system: str, prompt: str, images,
+                 timeout: float = GEMMA_TIMEOUT_S) -> dict:
+    """One Gemma call (Gemini API) over REST with the standard library only (Isaac's Python has no google-genai).
 
     `images`: a path, or a list of (label, path); missing files are skipped."""
     import urllib.request
@@ -172,18 +172,18 @@ def _gemini_rest(model_name: str, system: str, prompt: str, images,
             parts.append({"inline_data": {"mime_type": mime, "data": _encode_image(path)}})
     body = {"system_instruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2,
-                                 "thinkingConfig": {"thinkingLevel": os.environ.get("GEMINI_THINKING", "low")}}}
+            "generationConfig": {"temperature": 0.2,
+                                 "thinkingConfig": {"thinkingLevel": os.environ.get("GEMMA_THINKING", "minimal")}}}
     req = urllib.request.Request(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
         data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json", "x-goog-api-key": os.environ["GEMINI_API_KEY"]})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read())
-    text = out["candidates"][0]["content"]["parts"][0]["text"].strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return json.loads(text)
+    # Gemma may add prose or fences around the JSON: take the outermost {...}
+    text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]
+                   if not p.get("thought"))
+    return json.loads(text[text.index("{"):text.rindex("}") + 1])
 
 
 # Live fallback never clears a contact it can't verify: "other" -> uncertain with a standoff.
@@ -227,12 +227,12 @@ def _inspection_images(contact: dict, inspection_path: str) -> list:
 
 
 def classify_contact(contact: dict, inspection_path: str, view: dict,
-                     model_name: str = "gemini-3.8-flash") -> dict:
+                     model_name: str = "gemma-4-26b-a4b-it") -> dict:
     """Classify a single contact during the live mission loop.
 
-    Called by sim/mission.py. Gemini (REST, 8 s timeout) reads the inspection image; on any failure
+    Called by sim/mission.py. Gemma (REST, 8 s timeout) reads the inspection image; on any failure
     the local fallback decides. Safety guard: a mine_like contact is never cleared as non-UXO.
-    Adapts to visibility: in murky water, tells Gemini to weight sonar over camera and tightens
+    Adapts to visibility: in murky water, tells Gemma to weight sonar over camera and tightens
     the safety policy (never clears as non-UXO without clear camera confirmation).
     """
     cid = contact["id"]
@@ -260,24 +260,24 @@ def classify_contact(contact: dict, inspection_path: str, view: dict,
             prompt = (f"Contact {cid}: sonar detector class={cls} (conf {conf:.2f}), "
                       f"sonar box size about {contact.get('size_m', 'unknown')} m (axis-aligned, rough), "
                       f"inspected from the {(view or {}).get('chosen', 'unknown')}.{vis_note}")
-            result = _gemini_rest(model_name, SINGLE_SYSTEM_PROMPT, prompt, _inspection_images(contact, inspection_path))
+            result = _gemma_rest(model_name, SINGLE_SYSTEM_PROMPT, prompt, _inspection_images(contact, inspection_path))
             assert result["class"] in ("UXO", "non-UXO", "uncertain")
             verdict = {"contact_id": cid, "class": result["class"],
                        "confidence": float(result["confidence"]), "priority": 1,
                        "standoff_m": int(result["standoff_m"]), "reason": str(result["reason"]),
-                       "object_type": str(result.get("object_type", "unknown")), "source": "gemini",
+                       "object_type": str(result.get("object_type", "unknown")), "source": "gemma",
                        "visibility": visibility["quality"]}
             if adapted:
                 verdict["adapted"] = adapted
             if cls == "mine_like" and verdict["class"] == "non-UXO":
-                verdict.update({"class": "uncertain", "standoff_m": 25, "source": "gemini+guard",
+                verdict.update({"class": "uncertain", "standoff_m": 25, "source": "gemma+guard",
                                 "reason": verdict["reason"] + " (Detector flagged mine-like: kept as uncertain.)"})
             if murky and verdict["class"] == "non-UXO":
-                verdict.update({"class": "uncertain", "standoff_m": 25, "source": "gemini+murky_guard",
+                verdict.update({"class": "uncertain", "standoff_m": 25, "source": "gemma+murky_guard",
                                 "reason": verdict["reason"] + " (Low visibility: cannot confirm non-UXO, kept as uncertain.)"})
             return verdict
         except Exception as e:
-            print(f"[planner] Gemini classify_contact failed ({e!r}); local fallback", file=sys.stderr, flush=True)
+            print(f"[planner] Gemma classify_contact failed ({e!r}); local fallback", file=sys.stderr, flush=True)
 
     fb = LIVE_FALLBACK.get(cls, LIVE_FALLBACK["other"])
     verdict = {"contact_id": cid, "class": fb["class"], "confidence": round(conf * fb["confidence"], 2),
@@ -292,7 +292,7 @@ def classify_contact(contact: dict, inspection_path: str, view: dict,
 
 
 def classify_with_template(contacts: list) -> list:
-    """Fallback: classify using simple rules when Gemini is unavailable."""
+    """Fallback: classify using simple rules when Gemma is unavailable."""
     targets = []
     priority = 1
     # Sort mine_like first
@@ -311,7 +311,7 @@ def classify_with_template(contacts: list) -> list:
     return targets
 
 
-def run(run_dir: str, use_gemini: bool = True) -> list:
+def run(run_dir: str, use_gemma: bool = True) -> list:
     """Main entry point. Reads contacts.json, writes targets.json."""
     contacts_path = os.path.join(run_dir, "contacts.json")
     with open(contacts_path) as f:
@@ -319,11 +319,11 @@ def run(run_dir: str, use_gemini: bool = True) -> list:
 
     if not contacts:
         targets = []
-    elif use_gemini:
+    elif use_gemma:
         try:
-            targets = classify_with_gemini(contacts, run_dir)
+            targets = classify_with_gemma(contacts, run_dir)
         except Exception as e:
-            print(f"[planner] Gemini failed ({e}), falling back to template", file=sys.stderr)
+            print(f"[planner] Gemma failed ({e}), falling back to template", file=sys.stderr)
             targets = classify_with_template(contacts)
     else:
         targets = classify_with_template(contacts)
@@ -338,5 +338,5 @@ def run(run_dir: str, use_gemini: bool = True) -> list:
 
 if __name__ == "__main__":
     run_dir = sys.argv[1] if len(sys.argv) > 1 else "runs/sample"
-    use_gemini = "--no-gemini" not in sys.argv
-    run(run_dir, use_gemini=use_gemini)
+    use_gemma = not ({"--no-gemma", "--no-gemini"} & set(sys.argv))
+    run(run_dir, use_gemma=use_gemma)

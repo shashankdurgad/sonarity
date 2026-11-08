@@ -31,11 +31,11 @@ OceanSim (Isaac Sim) ── sonar + camera ──► detector (YOLOv8) ──►
          │  SURVEY → HOLD → REPLAN (keep-out + A*) → IMAGINE → INSPECT → CLASSIFY → RESUME (→ REVISIT)
          ▼
   imagine_contact (agent/imagine.py + sim/visit.py)   classify_contact (agent/planner.py)
-  bomb vs rock from 4 sides, < 1 s, on board          Gemini on the inspection images; local rule
+  bomb vs rock from 4 sides, < 1 s, on board          Gemma (multimodal) on camera + sonar; local rule
                                                        fallback; mine-like is never cleared as safe
 ```
 
-**Autonomy:** holding, keep-out, re-planning and the choice of inspection angle are always computed on the robot from its own sensor data, never from the simulator's ground truth. Classification calls Gemini (≈4 s, 8 s timeout); if the link fails, the on-board rule decides, so the robot never depends on the link to stay safe.
+**Autonomy:** holding, keep-out, re-planning and the choice of inspection angle are always computed on the robot from its own sensor data, never from the simulator's ground truth. Classification uses **Gemma 4** (`gemma-4-26b-a4b-it`), an open multimodal model: it gets the camera and sonar images from the chosen side plus the first sonar detection, and returns a verdict with its reasoning in plain language (8 s timeout). Today it is called through the Gemini API; because Gemma is open-weight it can run on the robot's own GPU. If the call fails, the on-board rule decides, so the robot never depends on the link to stay safe. (The recorded final take was classified with Gemini before we switched to Gemma.)
 
 ### The imagination step
 
@@ -60,14 +60,14 @@ A bomb is long and thin and casts a long straight sonar shadow; a rock is round.
 
 ## Running it
 
-Requirements: Python 3.10+ and `pip install -r requirements.txt` for the local parts; a Modal account with an NGC secret for the simulator (see `infra/image.py`); `GEMINI_API_KEY` for Gemini verdicts (optional).
+Requirements: Python 3.10+ and `pip install -r requirements.txt` for the local parts; a Modal account with an NGC secret for the simulator (see `infra/image.py`); `GEMINI_API_KEY` (Google AI key) for Gemma verdicts (optional).
 
 ```bash
 pip install -r requirements.txt
 
 # Smoke tests + batch pipeline on the sample run (no GPU)
 python tests/test_smoke.py
-python run_demo.py runs/sample --no-gemini
+python run_demo.py runs/sample --no-gemma
 
 # Live mission on Modal (Isaac Sim + OceanSim on an L40S)
 python -P -m modal run infra/mission.py::main --seed 1 --scenario clear_sand --tag final
@@ -85,9 +85,9 @@ Run folders follow the contract in `PLAN.md` §11: `mission_log.jsonl`, `sonar/`
 
 - Simulation only; distances and keep-out radii are scaled to a 32 m test site.
 - The detector sometimes sees low objects late and sometimes labels bombs `other`; the mission holds for any contact near the route, so this is safe but affects verdicts.
-- Classification uses a remote model (Gemini) with an on-board fallback.
+- Gemma is currently called remotely, with an on-board fallback; running it on the robot is the next step.
 - The imagination model is a simplified sonar (no multipath or water-column effects).
 
 ## Credits
 
-Built by **Team Sonarity** (Aditya Menon, Magizh Shankar, Shashank Durgad, Ibaad Muhammad, Samaira Khan) at Agentverse 2026. OceanSim by the University of Michigan Field Robotics Group; NVIDIA Isaac Sim; Ultralytics YOLOv8; Google Gemini; NVIDIA Cosmos 3 Edge (experiment). Marine-life models in the beauty render are CC BY (see the credits file in the render assets).
+Built by **Team Sonarity** (Aditya Menon, Magizh Shankar, Shashank Durgad, Ibaad Muhammad, Samaira Khan) at Agentverse 2026. OceanSim by the University of Michigan Field Robotics Group; NVIDIA Isaac Sim; Ultralytics YOLOv8; Google Gemma; NVIDIA Cosmos 3 Edge (experiment). Marine-life models in the beauty render are CC BY (see the credits file in the render assets).

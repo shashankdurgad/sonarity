@@ -26,7 +26,7 @@ EVENTS = "uxo-mission-events"
 
 
 @app.function(image=isaac_image, gpu="L40S", timeout=3600, volumes={CACHE_MOUNT: cache_volume, "/runs": runs_volume},
-              secrets=[modal.Secret.from_name("gemini")])  # GEMINI_API_KEY for agent.planner.classify_contact
+              secrets=[modal.Secret.from_name("gemini")])  # GEMINI_API_KEY (Google AI key, used for Gemma) for agent.planner.classify_contact
 def mission(run_id: str, seed: int, scenario: str, lanes: int, auto: list[str], use_yolo: bool = True,
             extra: list[str] = (), bus_name: str = EVENTS) -> bytes:
     link_caches()

@@ -304,7 +304,7 @@ def compose_frame(f):
                 text(d, (W / 2, H - 230 + 30 * k), ln, F_SM if k else F_MED, CYAN if not k else WHITE, anchor="ma")
     # footer
     text(d, (W / 2, H - 34), f"Rendered replay of logged mission {TL.run_id} · every robot decision is from the live run "
-         "(Isaac Sim + OceanSim, YOLOv8 sonar detector, Gemini verdicts)", F_MONO_S, (170, 200, 210), anchor="ma")
+         "(Isaac Sim + OceanSim, YOLOv8 sonar detector, Gemma verdicts)", F_MONO_S, (170, 200, 210), anchor="ma")
     out = Image.alpha_composite(base, ov).convert("RGB")
     out.save(dst)
     return True

@@ -109,7 +109,7 @@ def test_targets_json():
 def test_pipeline_on_stubs():
     """Run run_demo.py on sample data with template planner."""
     result = subprocess.run(
-        [sys.executable, "run_demo.py", "runs/sample", "--no-gemini"],
+        [sys.executable, "run_demo.py", "runs/sample", "--no-gemma"],
         capture_output=True, text=True, cwd=os.path.join(os.path.dirname(__file__), ".."),
     )
     assert result.returncode == 0, f"Pipeline failed:\n{result.stderr}"

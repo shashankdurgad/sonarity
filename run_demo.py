@@ -4,7 +4,7 @@
 Usage:
     python run_demo.py                          # run on stubs (runs/sample)
     python run_demo.py runs/001                 # run on a specific run directory
-    python run_demo.py runs/001 --no-gemini     # skip Gemini, use template planner
+    python run_demo.py runs/001 --no-gemma     # skip Gemma, use template planner
     python run_demo.py runs/001 --skip sim      # skip sim steps (use existing files)
     python run_demo.py runs/001 --only planner  # run only the planner step
 """
@@ -70,10 +70,10 @@ def step_imagine(run_dir: str, **_):
     return True
 
 
-def step_planner(run_dir: str, use_gemini: bool = True, **_):
-    """Run the Gemini planner to classify contacts."""
+def step_planner(run_dir: str, use_gemma: bool = True, **_):
+    """Run the Gemma planner to classify contacts."""
     from agent.planner import run as planner_run
-    planner_run(run_dir, use_gemini=use_gemini)
+    planner_run(run_dir, use_gemma=use_gemma)
     return True
 
 
@@ -108,7 +108,8 @@ STEP_FUNCS = {
 def main():
     parser = argparse.ArgumentParser(description="Run the UXO detection pipeline")
     parser.add_argument("run_dir", nargs="?", default="runs/sample")
-    parser.add_argument("--no-gemini", action="store_true", help="Use template planner instead of Gemini")
+    parser.add_argument("--no-gemma", "--no-gemini", dest="no_gemma", action="store_true",
+                        help="Use template planner instead of Gemma")
     parser.add_argument("--skip", nargs="*", default=[], help="Steps to skip")
     parser.add_argument("--only", nargs="*", default=[], help="Run only these steps")
     args = parser.parse_args()
@@ -129,7 +130,7 @@ def main():
 
         print(f"--- {step_name} ---")
         t0 = time.time()
-        ok = STEP_FUNCS[step_name](args.run_dir, use_gemini=not args.no_gemini)
+        ok = STEP_FUNCS[step_name](args.run_dir, use_gemma=not args.no_gemma)
         elapsed = time.time() - t0
         status = "OK" if ok else "SKIPPED"
         print(f"--- {step_name}: {status} ({elapsed:.1f}s) ---\n")
