@@ -163,6 +163,8 @@ class Timeline:
         v = self.verdict_step.get(cid)
         if v and self.step_of(f) >= v[0]:
             return v[1]
+        if f >= self.n_mission_frames and cid in self.targets:  # final target list (incl. not inspected)
+            return self.targets[cid].get("class")
         return None
 
     # ------------------------------------------------------------ camera track

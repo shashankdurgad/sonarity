@@ -41,7 +41,7 @@ compose_image = (
               volumes={CACHE_MOUNT: cache_volume, "/runs": runs_volume})
 def render_shard(run_id: str, start: int = 0, end: int = -1, frames: str = "", variants: str = "",
                  spp: int = 48, mode: str = "PathTracing", width: int = 1920, height: int = 1080,
-                 out_sub: str = "frames", dump: bool = False) -> str:
+                 out_sub: str = "frames", dump: bool = False, debug_asset: str = "") -> str:
     link_caches()
     runs_volume.reload()
     out = f"/runs/{run_id}/beauty/{out_sub}"
@@ -54,6 +54,8 @@ def render_shard(run_id: str, start: int = 0, end: int = -1, frames: str = "", v
         cmd += ["--variants", variants]
     if dump:
         cmd += ["--dump-settings"]
+    if debug_asset:
+        cmd += ["--debug-asset", debug_asset]
     p = subprocess.run(cmd, cwd="/root/repo", capture_output=True, text=True)
     lines = [ln for ln in (p.stdout + p.stderr).splitlines()
              if ln.startswith(("[beauty", "SETTING", "Traceback", "  File", "Error", "RuntimeError", "ValueError",
@@ -84,10 +86,10 @@ def n_frames(run_id: str) -> int:
 @app.local_entrypoint()
 def main(run_id: str, shards: int = 8, frames: str = "", variants: str = "", spp: int = 48,
          mode: str = "PathTracing", width: int = 1920, height: int = 1080, compose_only: bool = False,
-         dump: bool = False, no_compose: bool = False):
+         dump: bool = False, no_compose: bool = False, debug_asset: str = ""):
     if frames:  # look test
         print(render_shard.remote(run_id, frames=frames, variants=variants, spp=spp, mode=mode,
-                                  width=width, height=height, out_sub="look", dump=dump))
+                                  width=width, height=height, out_sub="look", dump=dump, debug_asset=debug_asset))
         print(f"look frames: modal volume get uxo-runs {run_id}/beauty/look <dir>")
         return
     if not compose_only:

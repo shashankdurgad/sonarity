@@ -30,6 +30,7 @@ ap.add_argument("--mode", default="PathTracing", help="PathTracing | RaytracedLi
 ap.add_argument("--spp", type=int, default=48, help="subframes per frame (accumulation)")
 ap.add_argument("--variants", default="", help="look test: comma list of render modes to compare")
 ap.add_argument("--dump-settings", action="store_true")
+ap.add_argument("--debug-asset", default="", help="look test: aim the camera at shark|turtle")
 args, _ = ap.parse_known_args()
 
 import numpy as np  # noqa: E402
@@ -47,7 +48,7 @@ import carb  # noqa: E402
 import omni.kit.app  # noqa: E402
 import omni.usd  # noqa: E402
 from PIL import Image, ImageFilter  # noqa: E402
-from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdShade, Vt  # noqa: E402
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade, Vt  # noqa: E402
 
 omni.kit.app.get_app().get_extension_manager().set_extension_enabled_immediate("omni.replicator.core", True)
 import omni.replicator.core as rep  # noqa: E402
@@ -780,6 +781,120 @@ def update_life(f):
     SNOW.GetProtoIndicesAttr().Set(Vt.IntArray([0] * len(world) + [1] * len(bub)))
 
 
+# ============================================================ Objaverse assets (CC BY, credited in the video)
+ASSET_DIR = "/runs/_assets/glb"
+HERO = {}
+
+
+def import_glb(name):
+    glb = f"{ASSET_DIR}/{name}.glb"
+    if not os.path.exists(glb):
+        return None
+    cached = f"/runs/_assets/usd/{name}/{name}.usd"
+    if os.path.exists(cached):
+        return cached
+    usd = f"/tmp/assets/{name}/{name}.usd"
+    if os.path.exists(usd):
+        return usd
+    os.makedirs(os.path.dirname(usd), exist_ok=True)
+    import asyncio
+
+    omni.kit.app.get_app().get_extension_manager().set_extension_enabled_immediate("omni.kit.asset_converter", True)
+    import omni.kit.asset_converter as ac
+
+    ctx = ac.AssetConverterContext()
+    ctx.use_meter_as_world_unit = True
+    ctx.embed_textures = True
+    task = ac.get_instance().create_converter_task(glb, usd, None, ctx)
+    fut = asyncio.ensure_future(task.wait_until_finished())
+    while not fut.done():
+        app.update()
+    if not fut.result():
+        log("asset convert failed", name, task.get_status(), task.get_error_message())
+        return None
+    try:  # cache on the Volume for later shards/renders
+        import shutil
+        tmp = f"/runs/_assets/usd/.{name}.{os.getpid()}"
+        shutil.copytree(os.path.dirname(usd), tmp)
+        os.makedirs("/runs/_assets/usd", exist_ok=True)
+        if not os.path.exists(f"/runs/_assets/usd/{name}"):
+            os.rename(tmp, f"/runs/_assets/usd/{name}")
+    except Exception as e:  # noqa: BLE001
+        log("asset cache skipped", e)
+    return usd
+
+
+def place_asset(name, path, size_m, yaw_fix=0.0, rot_x=90.0, mat=None):
+    """Reference a converted asset; normalise it to Z-up, longest side = size_m, base at z=0, centred."""
+    usd = import_glb(name)
+    if usd is None:
+        return None
+    outer = xform(path)  # translate / rotateZ / scale, driven per frame
+    mid = UsdGeom.Xform.Define(stage, path + "/mid")
+    inner = UsdGeom.Xform.Define(stage, path + "/mid/m")
+    stage.DefinePrim(path + "/mid/m/ref", "Xform").GetReferences().AddReference(usd)
+    inner.AddRotateZOp().Set(float(yaw_fix))
+    inner.AddRotateXOp().Set(float(rot_x))  # glTF is Y-up (some assets are authored lying down)
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+    rng = cache.ComputeWorldBound(inner.GetPrim()).ComputeAlignedRange()
+    mn, mx = np.array(rng.GetMin()), np.array(rng.GetMax())
+    k = size_m / max(float(np.max(mx - mn)), 1e-6)
+    c = (mn + mx) / 2
+    mid.AddScaleOp().Set(Gf.Vec3f(k, k, k))
+    inner.AddTranslateOp().Set(Gf.Vec3d(-c[0], -c[1], -mn[2]))
+    ops = inner.GetOrderedXformOps()  # [rotateZ, rotateX, translate] as added
+    inner.SetXformOpOrder([ops[2], ops[0], ops[1]])  # rotate first, then re-centre (bbox was measured rotated)
+    if mat is not None:
+        bind(outer.GetPrim(), mat)
+    log(f"asset {name}: extent {np.round(mx - mn, 3)} -> scale {k:.3f}")
+    return outer
+
+
+def build_assets():
+    try:
+        HERO["shark"] = place_asset("shark", "/World/Life/Shark", 2.6)
+        HERO["turtle"] = place_asset("turtle", "/World/Life/Turtle", 1.1)
+        star = []
+        objs = [np.array(o["xyz"][:2]) for o in TL.world["objects"]]
+        path_pts = np.array([[s_["pose"]["x"], s_["pose"]["y"]] for s_ in TL.log])
+        for k in range(14):
+            for _ in range(200):
+                p = np.array([RNG.uniform(x0 - 6, x1 + 6), RNG.uniform(y0 - 6, y1 + 6)])
+                if all(np.linalg.norm(p - o) > 2.5 for o in objs) and np.min(np.linalg.norm(path_pts - p, axis=1)) > 1.5:
+                    break
+            sx_ = place_asset("starfish", f"/World/Decor/Star{k}", RNG.uniform(0.28, 0.42), rot_x=0.0,
+                              mat=material("starfish", color=(0.95, 0.45, 0.22), rough=0.75))
+            if sx_ is None:
+                break
+            z = float(seabed_h(np.array(p[0]), np.array(p[1])))
+            set_xf(sx_, t=(p[0], p[1], z - 0.02), rz=RNG.uniform(0, 360))
+            star.append(sx_)
+        log(f"assets: shark={HERO['shark'] is not None} turtle={HERO['turtle'] is not None} starfish={len(star)}")
+    except Exception as e:  # noqa: BLE001  never let decoration break a render
+        log("assets skipped:", repr(e))
+
+
+build_assets()
+
+
+def update_assets(f):
+    t = f / FPS
+    sh = HERO.get("shark")
+    if sh is not None:
+        a = 0.055 * t + 1.0
+        R_ = 21.0
+        p = (cx + R_ * math.cos(a), cy + 0.8 * R_ * math.sin(a), 4.2 + 0.6 * math.sin(t * 0.3))
+        heading = math.atan2(0.8 * math.cos(a), -math.sin(a)) + 0.08 * math.sin(t * 2.2)
+        set_xf(sh, t=p, rz=math.degrees(heading))
+    tu = HERO.get("turtle")
+    if tu is not None:
+        a = -0.035 * t + 3.5
+        R_ = 13.0
+        p = (cx + 4 + R_ * math.cos(a), cy - 3 + R_ * math.sin(a), 2.6 + 0.3 * math.sin(t * 0.5))
+        heading = math.atan2(-math.cos(a), math.sin(a))
+        set_xf(tu, t=p, rz=math.degrees(heading))
+
+
 # ============================================================ lights
 sun = UsdLux.DistantLight.Define(stage, "/World/Sun")
 sun.CreateIntensityAttr(1500.0)
@@ -804,6 +919,9 @@ CAM_OP = CAMX.AddTransformOp()
 
 def set_camera(f):
     c, t = TL.cam_pos[f], TL.cam_tgt[f]
+    if args.debug_asset and HERO.get(args.debug_asset) is not None:
+        t = np.array(_ops(HERO[args.debug_asset])["xformOp:translate"].Get())
+        c = t + np.array([2.5, -3.5, 0.8])
     fwd = (t - c) / (np.linalg.norm(t - c) + 1e-9)
     right = np.cross(fwd, [0, 0, 1.0])
     right /= np.linalg.norm(right) + 1e-9
@@ -897,6 +1015,7 @@ def update_scene(f):
         apply_render_settings(args.mode, mk)
         _last_murk[0] = mk
     update_life(f)
+    update_assets(f)
     set_camera(f)
 
 

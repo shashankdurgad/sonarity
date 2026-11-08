@@ -285,6 +285,15 @@ def compose_frame(f):
         panel(d, (W - 374, H - 374, W - 36, H - 36))
         ov.alpha_composite(sn, (W - 370, H - 370))
         text(d, (W - 52, H - 404), "FORWARD-LOOKING SONAR  ·  LIVE DATA", F_SM, CYAN, anchor="ra")
+    # end credits (CC BY attribution for the Objaverse models)
+    if f >= TL.n_mission_frames + FPS:
+        cr = os.path.join("/runs/_assets/glb/credits.json")
+        if os.path.exists(cr):
+            c = json.load(open(cr))
+            lines = ["3D MODELS (CC BY 4.0, via Objaverse / Sketchfab)"] + \
+                    [f"{v['title']} by {v['author']}" for v in c.values()]
+            for k, ln in enumerate(lines):
+                text(d, (W / 2, H - 230 + 30 * k), ln, F_SM if k else F_MED, CYAN if not k else WHITE, anchor="ma")
     # footer
     text(d, (W / 2, H - 34), f"Rendered replay of logged mission {TL.run_id} · every robot decision is from the live run "
          "(Isaac Sim + OceanSim, YOLOv8 sonar detector, Gemini verdicts)", F_MONO_S, (170, 200, 210), anchor="ma")
@@ -315,3 +324,10 @@ if __name__ == "__main__":
                     "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
                     OUT], check=True)
     print(f"[hud] wrote {OUT}", flush=True)
+    share = OUT.replace(".mp4", "_share720.mp4")
+    dur = len(frames) / FPS
+    kbps = int(26 * 8 * 1024 / max(dur, 1))  # ~26 MB target, fits chat upload limits
+    subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", OUT, "-vf", "scale=1280:720",
+                    "-c:v", "libx264", "-preset", "slow", "-b:v", f"{kbps}k", "-maxrate", f"{int(kbps * 1.3)}k",
+                    "-bufsize", f"{kbps * 2}k", "-pix_fmt", "yuv420p", "-movflags", "+faststart", share], check=True)
+    print(f"[hud] wrote {share}", flush=True)
