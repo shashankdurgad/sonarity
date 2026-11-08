@@ -54,6 +54,11 @@ else:
     except Exception:
         detect_frame = ml.detect_frame_standin
 try:
+    from agent.imagine import imagine_contact  # P5: NumPy sonar "imagination", runs on the robot
+except Exception as _e:
+    print(f"[mission] imagine_contact unavailable ({_e}); using stand-in view choice", flush=True)
+    imagine_contact = None
+try:
     from agent.planner import classify_contact  # P4
 except Exception:
     classify_contact = None
@@ -161,14 +166,38 @@ def remaining_survey():
     return [it["pose"] for it in queue if it["state"] in ("SURVEY", "RESUME")]
 
 
-def plan_inspection(c, here):
+def choose_view(c, here):
+    """P5's imagine_contact picks the side; any side inside ANOTHER keep-out zone is rejected and the
+    next-best clear side (by P5's scores) is used. Falls back to the stand-in if imagine fails."""
+    if imagine_contact is not None:
+        try:
+            v = imagine_contact(c, keep_out_m=ml.KEEP_OUT_M, robot_pose=here, out_dir=out)
+            if ml.pose_clear(v["pose"], circles):
+                return v
+            from sim import visit
+            rng = math.dist((v["pose"]["x"], v["pose"]["y"]), c["xy"])
+            for d in sorted(v["scores"], key=v["scores"].get, reverse=True):
+                sx, sy, hd = visit.sensor_pose(c["xy"], d, rng)
+                cand = {"x": sx, "y": sy, "yaw": hd}
+                if ml.pose_clear(cand, circles):
+                    return {**v, "chosen": d, "pose": cand,
+                            "reason": v["reason"] + f"; {v['chosen']} side is inside another keep-out zone, using {d}"}
+        except Exception as e:  # never let imagination stop the robot
+            print(f"[mission] imagine_contact failed ({e}); using stand-in", flush=True)
+    return ml.choose_view_standin(c, here, circles=circles)
+
+
+reinspect = []  # contacts whose inspection was interrupted by a newer, closer contact
+
+
+def plan_inspection(c, here, hold_steps=6, prefix="CONTACT"):
     """Hold, add a keep-out circle, re-plan the rest of the survey around it, inspect from outside, resume."""
     old = remaining_survey()
     clearance = ml.min_clearance(old, c["xy"])
     circles.append({"id": c["id"], "xy": c["xy"], "r": ml.KEEP_OUT_M})
     old_paths.append([here] + old)
     new_rest = ml.detour(old, circles)
-    view = ml.choose_view_standin(c, here, circles=circles)
+    view = choose_view(c, here)
     insp = view["pose"]
     if not ml.pose_clear(insp, circles):  # every side blocked: back off further on the chosen side
         dx, dy = ml.DIRECTIONS[view["chosen"]]
@@ -190,21 +219,37 @@ def plan_inspection(c, here):
                 break
     start = backoff[-1] if backoff else here
     to_insp = ml.route(start, insp, circles)
-    back = ml.route(insp, new_rest[k], circles) if new_rest else []
+    if not to_insp and math.dist((start["x"], start["y"]), (insp["x"], insp["y"])) > 0.5:
+        insp = None  # no safe path to any inspection side: skip the inspection, still avoid the zone
+    back = ml.route(insp or start, new_rest[k], circles) if new_rest else []
+    if new_rest and not back:
+        print(f"[mission] no safe route back to the survey around {c['id']}; holding", flush=True)
+        new_rest, k = [], 0
     why = (f"{c['id']} {'mine-like' if c['cls'] == 'mine_like' else 'unidentified'} contact, "
            f"{clearance:.1f} m from planned route (keep-out {ml.KEEP_OUT_M:.0f} m)")
+    done_ids = {t["contact_id"] for t in targets}
+    for it_ in queue:  # an inspection we were on our way to: remember it and come back afterwards
+        if it_.get("capture") and it_["contact"] not in done_ids and it_["contact"] != c["id"]:
+            prev = next((x for x in tracker.confirmed() if x["id"] == it_["contact"]), None)
+            if prev is not None and all(prev["id"] != r["id"] for r in reinspect):
+                reinspect.append(prev)
     queue.clear()
-    for _ in range(6):
-        queue.append(item(here, "HOLD", f"CONTACT {c['id']} AHEAD: stopping. {why}", contact=c["id"]))
+    # Already inside the zone (contact confirmed late): retreat FIRST, then hold outside it.
     for q in backoff:
         queue.append(item(q, "BACKOFF", f"inside {c['id']} keep-out zone: backing off", contact=c["id"]))
+    for _ in range(hold_steps):
+        queue.append(item(start, "HOLD", f"{prefix} {c['id']}: stopping. {why}", contact=c["id"]))
     for _ in range(4):
         queue.append(item(start, "REPLAN", f"re-planning route around {c['id']} keep-out zone", contact=c["id"]))
-    for q in to_insp:
-        queue.append(item(q, "INSPECT", f"moving to inspect {c['id']} from the {view['chosen']}", contact=c["id"]))
-    for n in range(4):
-        queue.append(item(insp, "INSPECT", f"inspecting {c['id']} from the {view['chosen']}", contact=c["id"],
-                          capture=(n == 3), view=view))
+    if insp is not None:
+        for q in to_insp:
+            queue.append(item(q, "INSPECT", f"moving to inspect {c['id']} from the {view['chosen']}", contact=c["id"]))
+        for n in range(4):
+            queue.append(item(insp, "INSPECT", f"inspecting {c['id']} from the {view['chosen']}", contact=c["id"],
+                              capture=(n == 3), view=view))
+    if not new_rest:
+        for _ in range(4):
+            queue.append(item(insp or start, "HOLD", f"no safe route onward past {c['id']}: holding for operator"))
     for q in back:
         queue.append(item(q, "RESUME", f"rejoining survey around {c['id']}"))
     for q in new_rest[k:]:
@@ -275,7 +320,7 @@ while queue and step < args.max_steps:
             tgt = ml.classify_standin(c, sonar)
         targets.append(tgt)
         viewpoints.append({"contact_id": c["id"], "chosen": view["chosen"], "scores": view["scores"],
-                           "imagined": {}, "inspection": ip})
+                           "imagined": view.get("imagined", {}), "inspection": ip, "reason": view.get("reason", "")})
         decision = f"verdict {c['id']}: {tgt['class']} ({tgt['reason']})"
 
     # Safety rule: act on a new contact in ANY moving state (a contact seen while resuming or transiting
@@ -295,6 +340,13 @@ while queue and step < args.max_steps:
                 break
             circles.append({"id": c["id"], "xy": c["xy"], "r": ml.KEEP_OUT_M})
             decision = f"{c['id']} logged, {clearance:.1f} m from route: no route change needed"
+
+    # Come back to an inspection that a newer contact interrupted, once we're moving on the survey again.
+    if (not decision and reinspect and it["state"] in ("SURVEY", "RESUME")
+            and not any(q.get("capture") for q in queue)):
+        c = reinspect.pop(0)
+        if c["id"] not in {t["contact_id"] for t in targets}:
+            decision = "RE-INSPECT: " + plan_inspection(c, pose, hold_steps=2, prefix="RETURNING TO")
 
     path_now = [it2["pose"] for it2 in queue]
     preview(step, sonar, chase, dets, it, path_now)

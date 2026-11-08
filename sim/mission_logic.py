@@ -200,7 +200,7 @@ def _astar(a, b, circles, inflate: float, res: float = 0.5, margin: float = 12.0
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 nb = (cur[0] + dx, cur[1] + dy)
-                if (dx or dy) and 0 <= nb[0] < nx and 0 <= nb[1] < ny and (free(nb) or nb == g):
+                if (dx or dy) and 0 <= nb[0] < nx and 0 <= nb[1] < ny and (free(nb) or math.dist(nb, g) <= 1.5):
                     nc = cost[cur] + math.hypot(dx, dy)
                     if nc < cost.get(nb, 1e18):
                         cost[nb], came[nb] = nc, cur
@@ -237,7 +237,11 @@ def route(a: dict, b: dict, circles: list[dict], step: float = STEP_M) -> list[d
     if _seg_clear(pa, pb, circles, CLEARANCE_M * 0.5):
         pts = straight(a, b, step)
     else:
-        wp = _astar(pa, pb, circles, CLEARANCE_M) or [pa, pb]
+        # Same margin as detour() so its rejoin points are reachable; then a smaller one. NEVER fall back to
+        # a straight line through a keep-out zone: if no path exists, return [] and the caller holds.
+        wp = _astar(pa, pb, circles, CLEARANCE_M * 0.5) or _astar(pa, pb, circles, 0.05)
+        if wp is None:
+            return []
         pts = _yawed(_resample(wp, step))
     if pts:
         pts[-1] = {**pts[-1], "yaw": b.get("yaw", pts[-1]["yaw"])}
