@@ -1,5 +1,35 @@
 # Live mission: the robot reacts while it runs
 
+## Status / handoff (P2, Sun 8 Nov 02:10; P2 is asleep, reachable in the morning)
+
+**Working on `main` (d102e5a):** the full live loop with real YOLO (P1), imagination (P5) and Gemini classify (P4/P1), on P3's merged scene. Mission events are human-triggered and safe to press at any moment.
+
+**Full-length test missions, one per scenario** (bomb triggered mid-inspection; it waited, then fired ahead of the robot). All are on the `uxo-runs` Volume, ready for the video:
+
+| Run (Volume `uxo-runs`) | Steps | Objects found | False contacts | Closest to uncovered bomb | Keep-out breaches |
+|---|---|---|---|---|---|
+| `full_clear_sand_s1` | 628 | 5/5 | 0 | 4.4 m | none |
+| `full_half_buried_s2` | 295 | 5/5 | 0 | 4.4 m | none |
+| `full_murky_s4` | 448 | 5/5 | 0 | 4.5 m | 2 steps at 3.0 m from a tyre (see P1 below), then backed off |
+
+Fetch with `python -P -m modal volume get uxo-runs full_clear_sand_s1 runs/`. Each folder has `mission_log.jsonl`, `timing.json`, `sonar/`, `cam/`, `chase/`, `imagined/`, `inspections/` (including `*_cam.png` with the camera aimed at the contact) and the PLAN §11 JSON files.
+
+**Recording a final take (whoever records):**
+```bash
+python -P -m modal run infra/mission.py::main --seed 1 --scenario clear_sand --tag final   # full survey, ~8-10 min
+python -P -m modal run infra/mission.py::trigger --event uncover_bomb                      # a person presses this, any time
+python -P -m modal run infra/mission.py::trigger --event murk_on                           # optional second change
+```
+If the robot is holding, inspecting or re-routing when you press it, the bomb waits and fires when it resumes surveying. It's placed 11–13 m ahead on the route, at least 9 m from the robot and clear of existing keep-out zones. Use `viz/mission_compose.py runs/final_clear_sand_s1` for the video.
+
+**Open items for teammates (from the test runs):**
+- **P1 (detector):** (1) Low objects are seen late: in `full_murky_s4` a tyre wasn't detected until 3.8 m, so the robot had to back off. (2) Aerial bombs are still sometimes classed `other`. The mission holds for any contact near the route, so this is safe, but it affects verdicts. (3) YOLO sometimes draws two overlapping boxes on one object. (4) Check for a blind spot in OceanSim's centre streak (dead ahead).
+- **P4 (classify):** verdicts across the 3 runs were mixed. A buried bomb was called non-UXO, two rocks were called UXO, and an uncovered bomb was called uncertain twice. The "murk makes the camera unusable, so say `uncertain`" logic isn't implemented yet: murk only degrades the camera.
+- **P5 (video):** the runs above give footage for all 3 scenarios. The camera panel now shows the contact during inspections (`inspections/*_cam.png`, and `cam/` frames at the inspection pose).
+- **P3:** pick the hero seed(s) for the final take. Seeds 1 (clear_sand), 2 (half_buried) and 4 (murky) are known to work end to end.
+
+---
+
 **Status:** proposed by P2 on Sat 7 Nov, late evening. The team works toward this after Gate B is saved. **The batch pipeline in PLAN.md stays as the baseline and safety net. Don't break it.**
 **Deadline:** submit by 14:00 on Sunday 8 Nov, so we can work through the night and the morning.
 

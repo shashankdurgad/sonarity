@@ -5,7 +5,7 @@
 
 The original 24-hour plan is in git history (`git show be98c51:PLAN.md`).
 
-> **Update (Sat 7 Nov, late): live mission.** After Gate B, the team works toward a live version where the robot detects, holds, re-plans around mines and inspects *during* the run, with a human-triggered mid-run change. Design, per-person functions and milestones: **[LIVE_MISSION.md](LIVE_MISSION.md)**. The batch pipeline below stays as the baseline. Submission moves to **14:00 Sunday 8 Nov**.
+> **Update (Sat 7 Nov, late): live mission.** After Gate B, the team works toward a live version where the robot detects, holds, re-plans around mines and inspects *during* the run, with a human-triggered mid-run change. Design, per-person functions, milestones and **the latest status / handoff and open items for each person**: **[LIVE_MISSION.md](LIVE_MISSION.md)** (top section). The batch pipeline below stays as the baseline. Submission moves to **14:00 Sunday 8 Nov**.
 
 ---
 
